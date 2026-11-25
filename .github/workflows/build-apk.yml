@@ -1,0 +1,108 @@
+name: Build & Publish QuietDrawer APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build APK & Publish Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Accept Android SDK licenses
+        run: |
+          SDK_MANAGER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDK_MANAGER" ]; then
+            yes | "$SDK_MANAGER" --licenses > /dev/null || true
+          fi
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Restore consistent signing keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          else
+            keytool -genkey -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=QuietDrawer,O=QuietDrawer,C=US"
+          fi
+
+      - name: Build installable APK
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Prepare versioned APK asset
+        id: pkg
+        run: |
+          VERSION_NAME=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ -z "$VERSION_NAME" ]; then
+            VERSION_NAME="1.0.0"
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v${VERSION_NAME}"
+          fi
+          APK_NAME="QuietDrawer-${TAG}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
+          echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.apk_name }}
+          path: ${{ steps.pkg.outputs.apk_name }}
+
+      - name: Publish APK to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pkg.outputs.tag }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          APK_NAME: ${{ steps.pkg.outputs.apk_name }}
+        run: |
+          NOTES=$(printf '%s\n' \
+            "Installable Android APK for **QuietDrawer ${TAG}** (Build #${GITHUB_RUN_NUMBER})." \
+            "" \
+            "### How to install on Pixel" \
+            "1. Download \`${APK_NAME}\` directly on your phone (or send it via Quick Share)." \
+            "2. Tap the downloaded APK to install (updates seamlessly over previous QuietDrawer builds)." \
+            "3. On first install, allow Notification Access. If Android marks it as a restricted setting, open **Settings → Apps → QuietDrawer → ⋮ → Allow restricted settings** first.")
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK_NAME" --clobber
+            gh release edit "$TAG" --title "QuietDrawer ${TAG}" --notes "$NOTES"
+          else
+            gh release create "$TAG" "$APK_NAME" \
+              --title "QuietDrawer ${TAG}" \
+              --notes "$NOTES" \
+              --latest
+          fi
