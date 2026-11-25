@@ -1,0 +1,6 @@
+{
+  "name": "QuietDrawer",
+  "description": "A calm, Before Launcher-inspired notification manager that filters distracting alerts into a clean grouped inbox with multi-level swipe archiving, history, and intact app links.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

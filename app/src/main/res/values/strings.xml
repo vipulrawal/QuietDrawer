@@ -1,0 +1,106 @@
+<resources>
+    <string name="app_name">QuietDrawer</string>
+    <string name="notification_listener_label">QuietDrawer Notification Filter</string>
+
+    <!-- Navigation -->
+    <string name="nav_inbox">Inbox</string>
+    <string name="nav_archive">Archive</string>
+    <string name="nav_filters">Filters</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Permissions & Service Status -->
+    <string name="permission_banner_title">Enable Notification Access</string>
+    <string name="permission_banner_body">Allow QuietDrawer to catch distracting alerts and keep your status bar calm. Your notifications stay private on this device.</string>
+    <string name="permission_banner_cta">Grant Access</string>
+    <string name="filter_status_active">Filtering active</string>
+    <string name="filter_status_paused">Filtering paused</string>
+    <string name="filter_status_permission_needed">Access required</string>
+
+    <!-- Inbox -->
+    <string name="inbox_title">Inbox</string>
+    <string name="inbox_empty_title">All quiet</string>
+    <string name="inbox_empty_subtitle">Filtered notifications will collect here, grouped by app, so your status bar stays distraction-free.</string>
+    <string name="inbox_search_hint">Search notifications or apps…</string>
+    <string name="sort_newest">Newest first</string>
+    <string name="sort_oldest">Oldest first</string>
+    <string name="action_select">Select</string>
+    <string name="action_select_all">Select all</string>
+    <string name="action_cancel_selection">Cancel</string>
+    <string name="action_archive">Archive</string>
+    <string name="action_archive_group">Archive group</string>
+    <string name="action_collapse_group">Collapse group</string>
+    <string name="action_expand_group">Expand group</string>
+    <string name="action_collapse_all">Collapse all</string>
+    <string name="action_expand_all">Expand all</string>
+    <string name="action_restore">Restore</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_undo">Undo</string>
+    <string name="action_open_app">Open app</string>
+    <string name="swipe_to_archive_selected">Swipe left or right to archive %1$d selected</string>
+    <string name="selected_count">%1$d selected</string>
+    <string name="archived_single_snackbar">Notification archived</string>
+    <string name="archived_group_snackbar">Archived %1$d from %2$s</string>
+    <string name="archived_selected_snackbar">Archived %1$d notifications</string>
+    <string name="restored_snackbar">Restored to inbox</string>
+    <string name="deleted_snackbar">Removed from history</string>
+    <string name="open_app_failed">Could not open %1$s</string>
+
+    <!-- Archive / History -->
+    <string name="archive_title">Archive</string>
+    <string name="archive_empty_title">No archived history yet</string>
+    <string name="archive_empty_subtitle">Swipe left or right on any notification, selection, or app group in your Inbox to archive it here.</string>
+    <string name="archive_group_by_date">By date</string>
+    <string name="archive_group_by_app">By app</string>
+    <string name="archive_clear_all">Clear history</string>
+    <string name="archive_clear_confirm_title">Clear archived history?</string>
+    <string name="archive_clear_confirm_body">This permanently removes all archived notifications from local storage. Inbox items and app filter rules are not affected.</string>
+    <string name="archive_clear_confirm_cta">Clear all</string>
+    <string name="cancel">Cancel</string>
+
+    <!-- Filters -->
+    <string name="filters_title">App Filters</string>
+    <string name="filters_subtitle">Choose which apps remain in your Android status bar. Everything else is quietly routed to QuietDrawer.</string>
+    <string name="filters_search_hint">Search installed apps…</string>
+    <string name="filters_tab_all">All</string>
+    <string name="filters_tab_allowed">In Status Bar</string>
+    <string name="filters_tab_filtered">In Inbox</string>
+    <string name="filters_badge_bar">Status Bar</string>
+    <string name="filters_badge_inbox">Inbox</string>
+    <string name="filters_allow_essentials">Allow Essentials</string>
+    <string name="filters_filter_all">Filter All</string>
+    <string name="filters_empty_search">No matching apps found</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_appearance_section">Appearance</string>
+    <string name="settings_theme_label">Theme</string>
+    <string name="theme_system">System</string>
+    <string name="theme_light">Light</string>
+    <string name="theme_dark">Dark</string>
+    <string name="settings_dynamic_color_title">Material You wallpaper colors</string>
+    <string name="settings_dynamic_color_subtitle">Blend with your Pixel wallpaper palette (Android 12+)</string>
+
+    <string name="settings_filtering_section">Notification Filtering</string>
+    <string name="settings_master_filter_title">Quiet filtering active</string>
+    <string name="settings_master_filter_subtitle">Catch non-allowed notifications and clear them from the status bar</string>
+    <string name="settings_skip_ongoing_title">Keep ongoing &amp; media alerts</string>
+    <string name="settings_skip_ongoing_subtitle">Leave calls, timers, navigation, and media controls in the status bar</string>
+    <string name="settings_archive_on_click_title">Archive after opening</string>
+    <string name="settings_archive_on_click_subtitle">Keep links intact in Archive after tapping an inbox item</string>
+    <string name="settings_listener_access_title">Android Notification Access</string>
+    <string name="settings_listener_access_granted">Connected and listening</string>
+    <string name="settings_listener_access_missing">Tap to grant access in Android Settings</string>
+    <string name="settings_send_test_title">Send test notification</string>
+    <string name="settings_send_test_subtitle">Verify filtering and click-to-open behavior on this device</string>
+    <string name="test_notification_sent">Test notification sent</string>
+    <string name="test_notification_permission_denied">Enable notification permission to send a test alert</string>
+
+    <string name="settings_updates_section">App Updates &amp; Package</string>
+    <string name="settings_current_version">Version %1$s (Build %2$d)</string>
+    <string name="settings_update_source_label">Release Feed URL or GitHub Repo (owner/repo)</string>
+    <string name="settings_update_source_hint">e.g. username/quietdrawer or https://…/update.json</string>
+    <string name="settings_check_updates">Check for Updates</string>
+    <string name="settings_checking_updates">Checking…</string>
+    <string name="settings_open_update">Open Update Release</string>
+    <string name="settings_update_info_note">QuietDrawer uses a stable package ID so installing any future signed release APK updates in-place without losing your filters or history.</string>
+</resources>
