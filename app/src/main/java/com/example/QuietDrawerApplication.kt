@@ -2,6 +2,7 @@ package com.example
 
 import android.app.Application
 import com.example.apps.InstalledAppsProvider
+import com.example.backup.GoogleDriveBackupClient
 import com.example.data.local.QuietDrawerDatabase
 import com.example.data.prefs.UserPreferencesRepository
 import com.example.data.repository.NotificationRepository
@@ -31,5 +32,9 @@ class QuietDrawerApplication : Application() {
 
     val updateChecker: UpdateChecker by lazy {
         UpdateChecker()
+    }
+
+    val driveBackupClient: GoogleDriveBackupClient by lazy {
+        GoogleDriveBackupClient()
     }
 }

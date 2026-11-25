@@ -103,4 +103,24 @@
     <string name="settings_checking_updates">Checking…</string>
     <string name="settings_open_update">Open Update Release</string>
     <string name="settings_update_info_note">QuietDrawer uses a stable package ID so installing any future signed release APK updates in-place without losing your filters or history.</string>
+
+    <!-- Google Sign-In & Drive Backup -->
+    <string name="settings_backup_section">Google Account &amp; Drive Backup</string>
+    <string name="backup_signed_out_title">Back up to Google Drive</string>
+    <string name="backup_signed_out_subtitle">Sign in with Google to save your app filter rules, preferences, and notification history to your private Google Drive app folder so you can restore after reinstalling.</string>
+    <string name="backup_sign_in_cta">Sign in with Google</string>
+    <string name="backup_signing_in">Signing in…</string>
+    <string name="backup_sign_out">Sign out</string>
+    <string name="backup_now_cta">Back Up Now</string>
+    <string name="backup_in_progress">Backing up…</string>
+    <string name="backup_restore_cta">Restore</string>
+    <string name="backup_restoring">Restoring…</string>
+    <string name="backup_checking_cloud">Checking Drive…</string>
+    <string name="backup_no_cloud_copy">No Drive backup saved yet</string>
+    <string name="backup_restore_confirm_title">Restore from Google Drive?</string>
+    <string name="backup_restore_confirm_body">This will restore your backed-up app filter rules, preferences, and notification history from your private Google Drive backup.</string>
+    <string name="backup_restore_confirm_cta">Restore now</string>
+    <string name="backup_privacy_note">Stored privately in your Google Drive app-data folder. QuietDrawer cannot view or access any of your other Drive files.</string>
+    <string name="backup_local_export">Save local copy</string>
+    <string name="backup_local_import">Restore file</string>
 </resources>

@@ -67,6 +67,7 @@ import com.example.R
 import com.example.data.model.ThemeMode
 import com.example.service.QuietNotificationListenerService
 import com.example.ui.QuietDrawerViewModel
+import com.example.ui.components.GoogleDriveBackupCard
 import com.example.update.UpdateCheckResult
 import com.example.update.UpdateChecker
 
@@ -127,7 +128,12 @@ fun SettingsScreen(
                 )
             }
 
-            // 1. Appearance Section (Light / Dark / Match System + Dynamic Color)
+            // 1. Google Sign-In & Drive Backup Section
+            item {
+                GoogleDriveBackupCard(viewModel = viewModel)
+            }
+
+            // 2. Appearance Section (Light / Dark / Match System + Dynamic Color)
             item {
                 SettingsSectionCard(title = stringResource(R.string.settings_appearance_section)) {
                     Text(

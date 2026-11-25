@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.data.model.ThemeMode
@@ -24,6 +25,9 @@ data class UserPreferences(
     val archiveOnClick: Boolean = false,
     val sortNewestFirst: Boolean = true,
     val updateFeedUrl: String = "",
+    val signedInEmail: String? = null,
+    val signedInDisplayName: String? = null,
+    val lastDriveBackupAt: Long? = null,
 )
 
 class UserPreferencesRepository(private val context: Context) {
@@ -36,6 +40,9 @@ class UserPreferencesRepository(private val context: Context) {
         val ARCHIVE_ON_CLICK = booleanPreferencesKey("archive_on_click")
         val SORT_NEWEST_FIRST = booleanPreferencesKey("sort_newest_first")
         val UPDATE_FEED_URL = stringPreferencesKey("update_feed_url")
+        val SIGNED_IN_EMAIL = stringPreferencesKey("signed_in_email")
+        val SIGNED_IN_DISPLAY_NAME = stringPreferencesKey("signed_in_display_name")
+        val LAST_DRIVE_BACKUP_AT = longPreferencesKey("last_drive_backup_at")
     }
 
     val preferencesFlow: Flow<UserPreferences> = context.userPreferencesDataStore.data.map { prefs ->
@@ -47,6 +54,9 @@ class UserPreferencesRepository(private val context: Context) {
             archiveOnClick = prefs[Keys.ARCHIVE_ON_CLICK] ?: false,
             sortNewestFirst = prefs[Keys.SORT_NEWEST_FIRST] ?: true,
             updateFeedUrl = prefs[Keys.UPDATE_FEED_URL] ?: "",
+            signedInEmail = prefs[Keys.SIGNED_IN_EMAIL]?.takeIf { it.isNotBlank() },
+            signedInDisplayName = prefs[Keys.SIGNED_IN_DISPLAY_NAME]?.takeIf { it.isNotBlank() },
+            lastDriveBackupAt = prefs[Keys.LAST_DRIVE_BACKUP_AT]?.takeIf { it > 0L },
         )
     }
 
@@ -78,5 +88,53 @@ class UserPreferencesRepository(private val context: Context) {
 
     suspend fun setUpdateFeedUrl(url: String) {
         context.userPreferencesDataStore.edit { it[Keys.UPDATE_FEED_URL] = url.trim() }
+    }
+
+    suspend fun setSignedInAccount(email: String?, displayName: String?) {
+        context.userPreferencesDataStore.edit { prefs ->
+            if (email.isNullOrBlank()) {
+                prefs.remove(Keys.SIGNED_IN_EMAIL)
+                prefs.remove(Keys.SIGNED_IN_DISPLAY_NAME)
+            } else {
+                prefs[Keys.SIGNED_IN_EMAIL] = email.trim()
+                if (displayName.isNullOrBlank()) {
+                    prefs.remove(Keys.SIGNED_IN_DISPLAY_NAME)
+                } else {
+                    prefs[Keys.SIGNED_IN_DISPLAY_NAME] = displayName.trim()
+                }
+            }
+        }
+    }
+
+    suspend fun setLastDriveBackupAt(timestampMs: Long?) {
+        context.userPreferencesDataStore.edit { prefs ->
+            if (timestampMs == null || timestampMs <= 0L) {
+                prefs.remove(Keys.LAST_DRIVE_BACKUP_AT)
+            } else {
+                prefs[Keys.LAST_DRIVE_BACKUP_AT] = timestampMs
+            }
+        }
+    }
+
+    suspend fun applyRestoredPreferences(
+        themeMode: ThemeMode,
+        dynamicColor: Boolean,
+        filteringEnabled: Boolean,
+        skipOngoingNotifications: Boolean,
+        archiveOnClick: Boolean,
+        sortNewestFirst: Boolean,
+        updateFeedUrl: String,
+    ) {
+        context.userPreferencesDataStore.edit { prefs ->
+            prefs[Keys.THEME_MODE] = themeMode.storageKey
+            prefs[Keys.DYNAMIC_COLOR] = dynamicColor
+            prefs[Keys.FILTERING_ENABLED] = filteringEnabled
+            prefs[Keys.SKIP_ONGOING] = skipOngoingNotifications
+            prefs[Keys.ARCHIVE_ON_CLICK] = archiveOnClick
+            prefs[Keys.SORT_NEWEST_FIRST] = sortNewestFirst
+            if (updateFeedUrl.isNotBlank()) {
+                prefs[Keys.UPDATE_FEED_URL] = updateFeedUrl.trim()
+            }
+        }
     }
 }

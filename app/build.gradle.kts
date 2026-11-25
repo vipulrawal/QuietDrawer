@@ -16,8 +16,21 @@ android {
     applicationId = "com.aistudio.quietdrawer.mrvkxp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0.0"
+    versionCode = 2
+    versionName = "1.1.0"
+
+    val oauthConfigFile = file("${rootDir}/firebase-applet-config.json")
+    val oauthClientId =
+      if (oauthConfigFile.exists()) {
+        Regex(""""oAuthClientId"\s*:\s*"([^"]*)"""")
+          .find(oauthConfigFile.readText())
+          ?.groupValues
+          ?.getOrNull(1)
+          .orEmpty()
+      } else {
+        ""
+      }
+    buildConfigField("String", "GOOGLE_OAUTH_CLIENT_ID", "\"$oauthClientId\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -111,12 +124,11 @@ dependencies {
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 
-  // Uncomment ALL FOUR of the following dependencies together to use Firebase Auth and Google
-  // Sign-In via Credential Manager:
-  // implementation(libs.firebase.auth)
-  // implementation(libs.androidx.credentials)
-  // implementation(libs.androidx.credentials.play.services)
-  // implementation(libs.googleid)
+  // Google Sign-In via Credential Manager & Google Drive OAuth via AuthorizationClient:
+  implementation(libs.androidx.credentials)
+  implementation(libs.androidx.credentials.play.services)
+  implementation(libs.googleid)
+  implementation(libs.play.services.auth)
   // implementation(libs.firebase.appcheck.recaptcha)
   // implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)

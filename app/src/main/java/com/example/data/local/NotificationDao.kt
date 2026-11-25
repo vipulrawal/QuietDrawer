@@ -61,4 +61,10 @@ interface NotificationDao {
 
     @Query("DELETE FROM filtered_notifications WHERE isArchived = 1")
     suspend fun clearAllArchived()
+
+    @Query("SELECT * FROM filtered_notifications ORDER BY postedAt DESC")
+    suspend fun getAllNotificationsSnapshot(): List<NotificationEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAll(notifications: List<NotificationEntity>)
 }

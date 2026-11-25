@@ -1,10 +1,15 @@
 package com.example.ui
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.QuietDrawerApplication
 import com.example.apps.InstalledAppInfo
+import com.example.backup.BackupSerializer
+import com.example.backup.DriveBackupMetadata
+import com.example.backup.GoogleAuthManager
+import com.example.backup.QuietDrawerBackupData
 import com.example.data.local.NotificationEntity
 import com.example.data.model.AppFilterTab
 import com.example.data.model.ArchiveGroupMode
@@ -13,6 +18,7 @@ import com.example.data.prefs.UserPreferences
 import com.example.service.QuietNotificationListenerService
 import com.example.ui.util.TimeFormatter
 import com.example.update.UpdateCheckResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -24,6 +30,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class NotificationAppGroup(
     val packageName: String,
@@ -56,14 +63,32 @@ sealed interface UiFeedbackEvent {
     data class Message(val text: String) : UiFeedbackEvent
 }
 
+enum class PendingDriveAction {
+    SIGN_IN_AND_CHECK,
+    BACKUP_NOW,
+    RESTORE_NOW,
+}
+
+data class DriveBackupUiState(
+    val isBusy: Boolean = false,
+    val busyMessage: String? = null,
+    val cloudBackup: DriveBackupMetadata? = null,
+    val statusMessage: String? = null,
+    val errorMessage: String? = null,
+)
+
 class QuietDrawerViewModel(application: Application) : AndroidViewModel(application) {
 
     private val app = application as QuietDrawerApplication
     private val repository = app.notificationRepository
     private val prefsRepo = app.preferencesRepository
     private val updateChecker = app.updateChecker
+    private val driveBackupClient = app.driveBackupClient
 
     val installedAppsProvider = app.installedAppsProvider
+
+    private val _driveBackupState = MutableStateFlow(DriveBackupUiState())
+    val driveBackupState: StateFlow<DriveBackupUiState> = _driveBackupState.asStateFlow()
 
     private val _events = MutableSharedFlow<UiFeedbackEvent>(extraBufferCapacity = 8)
     val events: SharedFlow<UiFeedbackEvent> = _events.asSharedFlow()
@@ -569,5 +594,199 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             _events.emit(UiFeedbackEvent.Message(message))
         }
+    }
+
+    // Google Sign-In & Google Drive Backup / Restore
+    fun setDriveBackupBusy(message: String) {
+        _driveBackupState.update {
+            it.copy(
+                isBusy = true,
+                busyMessage = message,
+                errorMessage = null,
+                statusMessage = null,
+            )
+        }
+    }
+
+    fun clearDriveBusyState() {
+        _driveBackupState.update {
+            it.copy(isBusy = false, busyMessage = null)
+        }
+    }
+
+    fun setDriveBackupError(message: String) {
+        _driveBackupState.update {
+            it.copy(
+                isBusy = false,
+                busyMessage = null,
+                errorMessage = message,
+                statusMessage = null,
+            )
+        }
+    }
+
+    fun recordSignedInAccount(email: String, displayName: String?) {
+        viewModelScope.launch {
+            prefsRepo.setSignedInAccount(email = email, displayName = displayName)
+        }
+    }
+
+    fun signOutGoogleAccount() {
+        viewModelScope.launch {
+            GoogleAuthManager.signOut(app)
+            prefsRepo.setSignedInAccount(email = null, displayName = null)
+            _driveBackupState.value = DriveBackupUiState(
+                statusMessage = "Signed out of Google account",
+            )
+            _events.emit(UiFeedbackEvent.Message("Signed out of Google account"))
+        }
+    }
+
+    fun completeDriveAction(action: PendingDriveAction, accessToken: String) {
+        viewModelScope.launch {
+            try {
+                // Ensure account email & name are recorded if Credential Manager fell back to AuthorizationClient
+                val currentPrefs = prefsRepo.getSnapshot()
+                if (currentPrefs.signedInEmail.isNullOrBlank()) {
+                    val profile = driveBackupClient.fetchUserProfile(accessToken)
+                    if (profile != null) {
+                        prefsRepo.setSignedInAccount(
+                            email = profile.email,
+                            displayName = profile.displayName,
+                        )
+                    } else {
+                        prefsRepo.setSignedInAccount(
+                            email = "Connected Google Account",
+                            displayName = null,
+                        )
+                    }
+                }
+
+                when (action) {
+                    PendingDriveAction.SIGN_IN_AND_CHECK -> {
+                        val metadata = driveBackupClient.findLatestBackupMetadata(accessToken)
+                        val msg = if (metadata != null) {
+                            "Signed in · Existing Drive backup found and ready to restore"
+                        } else {
+                            "Signed in · Ready to back up to Google Drive"
+                        }
+                        _driveBackupState.value = DriveBackupUiState(
+                            cloudBackup = metadata,
+                            statusMessage = msg,
+                        )
+                        _events.emit(UiFeedbackEvent.Message(msg))
+                    }
+
+                    PendingDriveAction.BACKUP_NOW -> {
+                        val prefsSnapshot = prefsRepo.getSnapshot()
+                        val filters = repository.getAllFiltersSnapshot()
+                        val notifications = repository.getAllNotificationsSnapshot()
+                        val now = System.currentTimeMillis()
+                        val payload = BackupSerializer.encode(
+                            prefs = prefsSnapshot,
+                            filters = filters,
+                            notifications = notifications,
+                            exportedAtMs = now,
+                        )
+                        val uploaded = driveBackupClient.uploadBackup(accessToken, payload)
+                        prefsRepo.setLastDriveBackupAt(now)
+                        val summary = "Backed up ${filters.size} app rules & ${notifications.size} notifications to Google Drive"
+                        _driveBackupState.value = DriveBackupUiState(
+                            cloudBackup = uploaded,
+                            statusMessage = summary,
+                        )
+                        _events.emit(UiFeedbackEvent.Message(summary))
+                    }
+
+                    PendingDriveAction.RESTORE_NOW -> {
+                        val metadata = _driveBackupState.value.cloudBackup
+                            ?: driveBackupClient.findLatestBackupMetadata(accessToken)
+                        if (metadata == null) {
+                            setDriveBackupError("No QuietDrawer backup was found in this Google Drive account.")
+                            return@launch
+                        }
+                        val rawJson = driveBackupClient.downloadBackup(accessToken, metadata.fileId)
+                        val parsed = BackupSerializer.decode(rawJson)
+                        val summary = applyParsedBackup(parsed, sourceLabel = "Google Drive")
+                        _driveBackupState.value = DriveBackupUiState(
+                            cloudBackup = metadata,
+                            statusMessage = summary,
+                        )
+                        _events.emit(UiFeedbackEvent.Message(summary))
+                    }
+                }
+            } catch (e: Exception) {
+                setDriveBackupError(e.localizedMessage ?: "Google Drive operation failed.")
+            }
+        }
+    }
+
+    fun exportLocalBackupToUri(uri: Uri) {
+        viewModelScope.launch {
+            setDriveBackupBusy("Saving local backup…")
+            try {
+                val prefsSnapshot = prefsRepo.getSnapshot()
+                val filters = repository.getAllFiltersSnapshot()
+                val notifications = repository.getAllNotificationsSnapshot()
+                val payload = BackupSerializer.encode(
+                    prefs = prefsSnapshot,
+                    filters = filters,
+                    notifications = notifications,
+                )
+                withContext(Dispatchers.IO) {
+                    app.contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(payload.toByteArray(Charsets.UTF_8))
+                    } ?: throw IllegalStateException("Could not open selected destination file.")
+                }
+                val msg = "Saved ${filters.size} app rules & ${notifications.size} notifications to file"
+                _driveBackupState.update { it.copy(isBusy = false, busyMessage = null, statusMessage = msg) }
+                _events.emit(UiFeedbackEvent.Message(msg))
+            } catch (e: Exception) {
+                setDriveBackupError(e.localizedMessage ?: "Failed to save local backup file.")
+            }
+        }
+    }
+
+    fun importLocalBackupFromUri(uri: Uri) {
+        viewModelScope.launch {
+            setDriveBackupBusy("Restoring from file…")
+            try {
+                val rawJson = withContext(Dispatchers.IO) {
+                    app.contentResolver.openInputStream(uri)?.use { input ->
+                        val bytes = input.readBytes()
+                        if (bytes.size > BackupSerializer.MAX_BACKUP_BYTES) {
+                            throw IllegalArgumentException("Backup file exceeds maximum supported size.")
+                        }
+                        bytes.toString(Charsets.UTF_8)
+                    } ?: throw IllegalStateException("Could not read selected backup file.")
+                }
+                val parsed = BackupSerializer.decode(rawJson)
+                val summary = applyParsedBackup(parsed, sourceLabel = "local file")
+                _driveBackupState.update { it.copy(isBusy = false, busyMessage = null, statusMessage = summary) }
+                _events.emit(UiFeedbackEvent.Message(summary))
+            } catch (e: Exception) {
+                setDriveBackupError(e.localizedMessage ?: "Failed to restore from backup file.")
+            }
+        }
+    }
+
+    private suspend fun applyParsedBackup(
+        backup: QuietDrawerBackupData,
+        sourceLabel: String,
+    ): String {
+        val (restoredFilters, restoredNotifs) = repository.restoreFromBackup(
+            filters = backup.appFilters,
+            notifications = backup.notifications,
+        )
+        prefsRepo.applyRestoredPreferences(
+            themeMode = backup.preferences.themeMode,
+            dynamicColor = backup.preferences.dynamicColor,
+            filteringEnabled = backup.preferences.filteringEnabled,
+            skipOngoingNotifications = backup.preferences.skipOngoingNotifications,
+            archiveOnClick = backup.preferences.archiveOnClick,
+            sortNewestFirst = backup.preferences.sortNewestFirst,
+            updateFeedUrl = backup.preferences.updateFeedUrl,
+        )
+        return "Restored $restoredFilters app rules & $restoredNotifs notifications from $sourceLabel"
     }
 }

@@ -26,4 +26,7 @@ interface AppFilterDao {
 
     @Query("UPDATE app_filters SET allowInStatusBar = 0")
     suspend fun filterAllApps()
+
+    @Query("SELECT * FROM app_filters ORDER BY appName COLLATE NOCASE ASC")
+    suspend fun getAllFiltersSnapshot(): List<AppFilterEntity>
 }

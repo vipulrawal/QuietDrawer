@@ -88,4 +88,39 @@ class NotificationRepository(
     suspend fun filterAllApps() {
         appFilterDao.filterAllApps()
     }
+
+    suspend fun getAllNotificationsSnapshot(): List<NotificationEntity> {
+        return notificationDao.getAllNotificationsSnapshot()
+    }
+
+    suspend fun getAllFiltersSnapshot(): List<AppFilterEntity> {
+        return appFilterDao.getAllFiltersSnapshot()
+    }
+
+    /**
+     * Restores app filter rules and notifications idempotently without duplicating existing items.
+     * Returns pair of (restoredFiltersCount, restoredNotificationsCount).
+     */
+    suspend fun restoreFromBackup(
+        filters: List<AppFilterEntity>,
+        notifications: List<NotificationEntity>,
+    ): Pair<Int, Int> {
+        if (filters.isNotEmpty()) {
+            appFilterDao.upsertAll(filters)
+        }
+
+        val existingKeys = notificationDao.getAllNotificationsSnapshot()
+            .map { Triple(it.packageName, it.postedAt, it.title) }
+            .toHashSet()
+
+        val newNotifications = notifications
+            .filter { Triple(it.packageName, it.postedAt, it.title) !in existingKeys }
+            .map { it.copy(id = 0L) }
+
+        if (newNotifications.isNotEmpty()) {
+            notificationDao.insertAll(newNotifications)
+        }
+
+        return filters.size to newNotifications.size
+    }
 }
