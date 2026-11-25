@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.IntentSender
-import android.content.MutableContextWrapper
 import android.util.Base64
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
@@ -17,12 +16,11 @@ import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.Scope
-import com.google.android.gms.tasks.Task
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import java.security.SecureRandom
 import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 sealed interface CredentialSignInResult {
@@ -34,6 +32,7 @@ sealed interface CredentialSignInResult {
 sealed interface DriveAuthResult {
     data class Authorized(val accessToken: String) : DriveAuthResult
     data class NeedsConsent(val intentSender: IntentSender) : DriveAuthResult
+    data object Cancelled : DriveAuthResult
     data class Error(val message: String) : DriveAuthResult
 }
 
@@ -66,7 +65,7 @@ object GoogleAuthManager {
                 .build()
 
             val response = credentialManager.getCredential(
-                context = MutableContextWrapper(activity),
+                context = activity,
                 request = request,
             )
 
@@ -82,6 +81,8 @@ object GoogleAuthManager {
             } else {
                 CredentialSignInResult.FallbackToAuthClient("Unexpected credential type")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: GetCredentialCancellationException) {
             CredentialSignInResult.Cancelled
         } catch (e: GetCredentialException) {
@@ -91,44 +92,78 @@ object GoogleAuthManager {
         }
     }
 
-    suspend fun authorizeDriveAccess(activity: Activity): DriveAuthResult {
-        return try {
-            val authRequest = AuthorizationRequest.builder()
-                .setRequestedScopes(DRIVE_BACKUP_SCOPES)
-                .build()
+    suspend fun authorizeDriveAccess(activity: Activity): DriveAuthResult =
+        suspendCancellableCoroutine { cont ->
+            try {
+                val authRequest = AuthorizationRequest.builder()
+                    .setRequestedScopes(DRIVE_BACKUP_SCOPES)
+                    .build()
 
-            val result = Identity.getAuthorizationClient(activity)
-                .authorize(authRequest)
-                .awaitTask()
+                Identity.getAuthorizationClient(activity)
+                    .authorize(authRequest)
+                    .addOnCompleteListener(activity) { task ->
+                        if (!cont.isActive) return@addOnCompleteListener
 
-            val pendingIntent = result.pendingIntent
-            val accessToken = result.accessToken
+                        if (task.isCanceled) {
+                            cont.resume(DriveAuthResult.Cancelled)
+                            return@addOnCompleteListener
+                        }
 
-            when {
-                result.hasResolution() && pendingIntent != null -> {
-                    DriveAuthResult.NeedsConsent(pendingIntent.intentSender)
-                }
-                !accessToken.isNullOrBlank() -> {
-                    DriveAuthResult.Authorized(accessToken)
-                }
-                else -> {
-                    DriveAuthResult.Error("Google Drive authorization did not return an access token.")
+                        if (!task.isSuccessful) {
+                            val ex = task.exception
+                            val msg = if (ex is ApiException) {
+                                friendlyApiErrorMessage(ex.statusCode)
+                            } else {
+                                ex?.localizedMessage ?: "Unable to authorize Google Drive."
+                            }
+                            cont.resume(DriveAuthResult.Error(msg))
+                            return@addOnCompleteListener
+                        }
+
+                        val result = task.result
+                        val pendingIntent = result.pendingIntent
+                        val accessToken = result.accessToken
+
+                        when {
+                            result.hasResolution() && pendingIntent != null -> {
+                                cont.resume(DriveAuthResult.NeedsConsent(pendingIntent.intentSender))
+                            }
+                            !accessToken.isNullOrBlank() -> {
+                                cont.resume(DriveAuthResult.Authorized(accessToken))
+                            }
+                            else -> {
+                                cont.resume(
+                                    DriveAuthResult.Error("Google Drive authorization did not return an access token.")
+                                )
+                            }
+                        }
+                    }
+            } catch (e: Exception) {
+                if (cont.isActive) {
+                    val msg = if (e is ApiException) {
+                        friendlyApiErrorMessage(e.statusCode)
+                    } else {
+                        e.localizedMessage ?: "Unable to start Google Drive authorization."
+                    }
+                    cont.resume(DriveAuthResult.Error(msg))
                 }
             }
-        } catch (e: ApiException) {
-            DriveAuthResult.Error(friendlyApiErrorMessage(e.statusCode))
-        } catch (e: Exception) {
-            DriveAuthResult.Error(e.localizedMessage ?: "Unable to authorize Google Drive.")
         }
-    }
 
-    fun extractAccessTokenFromIntent(context: Context, intent: Intent?): Result<String> {
+    fun extractAccessTokenFromIntent(
+        context: Context,
+        resultCode: Int,
+        intent: Intent?,
+    ): Result<String> {
+        if (resultCode != Activity.RESULT_OK && intent == null) {
+            return Result.failure(IllegalStateException("Google Drive sign-in was cancelled."))
+        }
         return try {
             val result = Identity.getAuthorizationClient(context)
                 .getAuthorizationResultFromIntent(intent)
             val token = result.accessToken
             if (token.isNullOrBlank()) {
-                Result.failure(IllegalStateException("Authorization cancelled or no access token returned."))
+                Result.failure(IllegalStateException("Google Drive authorization was cancelled."))
             } else {
                 Result.success(token)
             }
@@ -142,6 +177,8 @@ object GoogleAuthManager {
     suspend fun signOut(context: Context) {
         try {
             CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest())
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             // Safe to ignore if no credential state was cached
         }
@@ -162,18 +199,6 @@ object GoogleAuthManager {
             16 -> "Google sign-in was cancelled."
             7 -> "Network error while contacting Google. Please check your connection."
             else -> "Google authorization failed (code $statusCode). Please try again."
-        }
-    }
-
-    private suspend fun <T> Task<T>.awaitTask(): T = suspendCancellableCoroutine { cont ->
-        addOnSuccessListener { result ->
-            if (cont.isActive) cont.resume(result)
-        }
-        addOnFailureListener { error ->
-            if (cont.isActive) cont.resumeWithException(error)
-        }
-        addOnCanceledListener {
-            if (cont.isActive) cont.cancel()
         }
     }
 }

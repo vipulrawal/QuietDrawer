@@ -597,6 +597,25 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     // Google Sign-In & Google Drive Backup / Restore
+    private var pendingDriveAction: PendingDriveAction = PendingDriveAction.SIGN_IN_AND_CHECK
+    private var pendingAccountEmail: String? = null
+    private var pendingAccountDisplayName: String? = null
+
+    fun setPendingDriveAction(action: PendingDriveAction) {
+        pendingDriveAction = action
+    }
+
+    fun consumePendingDriveAction(): PendingDriveAction {
+        val current = pendingDriveAction
+        pendingDriveAction = PendingDriveAction.SIGN_IN_AND_CHECK
+        return current
+    }
+
+    fun setPendingSignedInAccount(email: String?, displayName: String?) {
+        pendingAccountEmail = email
+        pendingAccountDisplayName = displayName
+    }
+
     fun setDriveBackupBusy(message: String) {
         _driveBackupState.update {
             it.copy(
@@ -609,12 +628,16 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun clearDriveBusyState() {
+        pendingAccountEmail = null
+        pendingAccountDisplayName = null
         _driveBackupState.update {
             it.copy(isBusy = false, busyMessage = null)
         }
     }
 
     fun setDriveBackupError(message: String) {
+        pendingAccountEmail = null
+        pendingAccountDisplayName = null
         _driveBackupState.update {
             it.copy(
                 isBusy = false,
@@ -625,14 +648,10 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun recordSignedInAccount(email: String, displayName: String?) {
-        viewModelScope.launch {
-            prefsRepo.setSignedInAccount(email = email, displayName = displayName)
-        }
-    }
-
     fun signOutGoogleAccount() {
         viewModelScope.launch {
+            pendingAccountEmail = null
+            pendingAccountDisplayName = null
             GoogleAuthManager.signOut(app)
             prefsRepo.setSignedInAccount(email = null, displayName = null)
             _driveBackupState.value = DriveBackupUiState(
@@ -645,20 +664,29 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
     fun completeDriveAction(action: PendingDriveAction, accessToken: String) {
         viewModelScope.launch {
             try {
-                // Ensure account email & name are recorded if Credential Manager fell back to AuthorizationClient
-                val currentPrefs = prefsRepo.getSnapshot()
-                if (currentPrefs.signedInEmail.isNullOrBlank()) {
-                    val profile = driveBackupClient.fetchUserProfile(accessToken)
-                    if (profile != null) {
-                        prefsRepo.setSignedInAccount(
-                            email = profile.email,
-                            displayName = profile.displayName,
-                        )
-                    } else {
-                        prefsRepo.setSignedInAccount(
-                            email = "Connected Google Account",
-                            displayName = null,
-                        )
+                // Commit signed-in account atomically once Drive authorization has succeeded
+                val pendingEmail = pendingAccountEmail
+                val pendingName = pendingAccountDisplayName
+                pendingAccountEmail = null
+                pendingAccountDisplayName = null
+
+                if (!pendingEmail.isNullOrBlank()) {
+                    prefsRepo.setSignedInAccount(email = pendingEmail, displayName = pendingName)
+                } else {
+                    val currentPrefs = prefsRepo.getSnapshot()
+                    if (currentPrefs.signedInEmail.isNullOrBlank()) {
+                        val profile = driveBackupClient.fetchUserProfile(accessToken)
+                        if (profile != null) {
+                            prefsRepo.setSignedInAccount(
+                                email = profile.email,
+                                displayName = profile.displayName,
+                            )
+                        } else {
+                            prefsRepo.setSignedInAccount(
+                                email = "Connected Google Account",
+                                displayName = null,
+                            )
+                        }
                     }
                 }
 

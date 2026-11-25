@@ -1,11 +1,5 @@
 package com.example.ui.components
 
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -46,7 +40,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,127 +50,32 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
-import com.example.backup.CredentialSignInResult
-import com.example.backup.DriveAuthResult
-import com.example.backup.GoogleAuthManager
-import com.example.ui.PendingDriveAction
-import com.example.ui.QuietDrawerViewModel
+import com.example.data.prefs.UserPreferences
+import com.example.ui.DriveBackupUiState
 import com.example.ui.util.TimeFormatter
-import kotlinx.coroutines.launch
 
+/**
+ * Pure presentation card for Google Sign-In, Google Drive Backup & Restore, and local JSON backup.
+ * Activity result launchers and lifecycle-safe coroutines are hoisted above LazyColumn in SettingsScreen
+ * so scrolling or recomposition never cancels an active sign-in flow.
+ */
 @Composable
 fun GoogleDriveBackupCard(
-    viewModel: QuietDrawerViewModel,
+    prefs: UserPreferences,
+    backupState: DriveBackupUiState,
+    onSignInClick: () -> Unit,
+    onSignOutClick: () -> Unit,
+    onBackupNowClick: () -> Unit,
+    onRestoreNowClick: () -> Unit,
+    onLocalExportClick: () -> Unit,
+    onLocalImportClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val activity = remember(context) { context.findActivity() }
-    val scope = rememberCoroutineScope()
-
-    val prefs by viewModel.userPreferences.collectAsStateWithLifecycle()
-    val backupState by viewModel.driveBackupState.collectAsStateWithLifecycle()
-
-    var pendingAction by remember { mutableStateOf<PendingDriveAction?>(null) }
     var showRestoreConfirm by remember { mutableStateOf(false) }
 
     val isSignedIn = !prefs.signedInEmail.isNullOrBlank()
-
-    // Handles Google Play Services AuthorizationClient consent screen result
-    val consentLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult(),
-    ) { activityResult ->
-        val action = pendingAction ?: PendingDriveAction.SIGN_IN_AND_CHECK
-        pendingAction = null
-
-        val tokenResult = GoogleAuthManager.extractAccessTokenFromIntent(context, activityResult.data)
-        tokenResult
-            .onSuccess { accessToken ->
-                viewModel.completeDriveAction(action = action, accessToken = accessToken)
-            }
-            .onFailure { error ->
-                viewModel.setDriveBackupError(
-                    error.localizedMessage ?: "Google Drive authorization was cancelled."
-                )
-            }
-    }
-
-    // Zero-permission SAF local JSON backup export
-    val localExportLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/json"),
-    ) { uri ->
-        if (uri != null) {
-            viewModel.exportLocalBackupToUri(uri)
-        }
-    }
-
-    // Zero-permission SAF local JSON backup restore
-    val localImportLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-    ) { uri ->
-        if (uri != null) {
-            viewModel.importLocalBackupFromUri(uri)
-        }
-    }
-
-    fun startDriveAction(action: PendingDriveAction, requireSignInFirst: Boolean) {
-        val hostActivity = activity
-        if (hostActivity == null) {
-            viewModel.setDriveBackupError("Unable to access Activity context for Google Sign-In.")
-            return
-        }
-
-        scope.launch {
-            viewModel.setDriveBackupBusy(
-                when (action) {
-                    PendingDriveAction.SIGN_IN_AND_CHECK -> context.getString(R.string.backup_signing_in)
-                    PendingDriveAction.BACKUP_NOW -> context.getString(R.string.backup_in_progress)
-                    PendingDriveAction.RESTORE_NOW -> context.getString(R.string.backup_restoring)
-                }
-            )
-
-            if (requireSignInFirst) {
-                when (val credResult = GoogleAuthManager.signInWithCredentialManager(hostActivity)) {
-                    is CredentialSignInResult.Success -> {
-                        viewModel.recordSignedInAccount(
-                            email = credResult.email,
-                            displayName = credResult.displayName,
-                        )
-                    }
-                    CredentialSignInResult.Cancelled -> {
-                        viewModel.clearDriveBusyState()
-                        return@launch
-                    }
-                    is CredentialSignInResult.FallbackToAuthClient -> {
-                        // Proceed directly to Play Services AuthorizationClient which also handles account selection
-                    }
-                }
-            }
-
-            when (val authResult = GoogleAuthManager.authorizeDriveAccess(hostActivity)) {
-                is DriveAuthResult.Authorized -> {
-                    viewModel.completeDriveAction(action = action, accessToken = authResult.accessToken)
-                }
-                is DriveAuthResult.NeedsConsent -> {
-                    pendingAction = action
-                    try {
-                        consentLauncher.launch(
-                            IntentSenderRequest.Builder(authResult.intentSender).build()
-                        )
-                    } catch (e: Exception) {
-                        pendingAction = null
-                        viewModel.setDriveBackupError(
-                            e.localizedMessage ?: "Could not open Google consent prompt."
-                        )
-                    }
-                }
-                is DriveAuthResult.Error -> {
-                    viewModel.setDriveBackupError(authResult.message)
-                }
-            }
-        }
-    }
 
     if (showRestoreConfirm) {
         AlertDialog(
@@ -188,7 +86,7 @@ fun GoogleDriveBackupCard(
                 TextButton(
                     onClick = {
                         showRestoreConfirm = false
-                        startDriveAction(PendingDriveAction.RESTORE_NOW, requireSignInFirst = false)
+                        onRestoreNowClick()
                     },
                     modifier = Modifier.testTag("drive_confirm_restore_button"),
                 ) {
@@ -229,7 +127,6 @@ fun GoogleDriveBackupCard(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (!isSignedIn) {
-                    // Signed-out Google Sign-In & Drive Backup card
                     Row(
                         verticalAlignment = Alignment.Top,
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -264,12 +161,7 @@ fun GoogleDriveBackupCard(
                     }
 
                     Button(
-                        onClick = {
-                            startDriveAction(
-                                action = PendingDriveAction.SIGN_IN_AND_CHECK,
-                                requireSignInFirst = true,
-                            )
-                        },
+                        onClick = onSignInClick,
                         enabled = !backupState.isBusy,
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier
@@ -295,7 +187,6 @@ fun GoogleDriveBackupCard(
                         }
                     }
                 } else {
-                    // Signed-in Account header
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth(),
@@ -338,7 +229,7 @@ fun GoogleDriveBackupCard(
                         }
 
                         IconButton(
-                            onClick = { viewModel.signOutGoogleAccount() },
+                            onClick = onSignOutClick,
                             enabled = !backupState.isBusy,
                             modifier = Modifier.testTag("google_sign_out_button"),
                         ) {
@@ -350,7 +241,6 @@ fun GoogleDriveBackupCard(
                         }
                     }
 
-                    // Cloud backup status chip
                     Surface(
                         shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -388,18 +278,12 @@ fun GoogleDriveBackupCard(
                         }
                     }
 
-                    // Primary Backup & Restore buttons
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Button(
-                            onClick = {
-                                startDriveAction(
-                                    action = PendingDriveAction.BACKUP_NOW,
-                                    requireSignInFirst = false,
-                                )
-                            },
+                            onClick = onBackupNowClick,
                             enabled = !backupState.isBusy,
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
@@ -448,7 +332,6 @@ fun GoogleDriveBackupCard(
                     }
                 }
 
-                // Inline status or error feedback
                 backupState.statusMessage?.let { status ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -489,7 +372,6 @@ fun GoogleDriveBackupCard(
                     }
                 }
 
-                // Privacy assurance note
                 Row(
                     verticalAlignment = Alignment.Top,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -511,13 +393,12 @@ fun GoogleDriveBackupCard(
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                // Zero-permission local JSON export/import fallback
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     TextButton(
-                        onClick = { localExportLauncher.launch("quietdrawer-backup.json") },
+                        onClick = onLocalExportClick,
                         enabled = !backupState.isBusy,
                         modifier = Modifier
                             .weight(1f)
@@ -533,7 +414,7 @@ fun GoogleDriveBackupCard(
                     }
 
                     TextButton(
-                        onClick = { localImportLauncher.launch(arrayOf("application/json", "*/*")) },
+                        onClick = onLocalImportClick,
                         enabled = !backupState.isBusy,
                         modifier = Modifier
                             .weight(1f)
@@ -551,10 +432,4 @@ fun GoogleDriveBackupCard(
             }
         }
     }
-}
-
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
 }

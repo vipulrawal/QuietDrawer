@@ -1,11 +1,15 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
@@ -52,6 +56,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -62,14 +67,20 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import com.example.BuildConfig
 import com.example.R
+import com.example.backup.CredentialSignInResult
+import com.example.backup.DriveAuthResult
+import com.example.backup.GoogleAuthManager
 import com.example.data.model.ThemeMode
 import com.example.service.QuietNotificationListenerService
+import com.example.ui.PendingDriveAction
 import com.example.ui.QuietDrawerViewModel
 import com.example.ui.components.GoogleDriveBackupCard
 import com.example.update.UpdateCheckResult
 import com.example.update.UpdateChecker
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(
@@ -77,15 +88,115 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val hostActivity = remember(context) { context.findComponentActivity() }
     val prefs by viewModel.userPreferences.collectAsStateWithLifecycle()
     val hasAccess by viewModel.isNotificationAccessGranted.collectAsStateWithLifecycle()
     val updateResult by viewModel.updateCheckResult.collectAsStateWithLifecycle()
+    val backupState by viewModel.driveBackupState.collectAsStateWithLifecycle()
 
     var updateSourceText by rememberSaveable { mutableStateOf(prefs.updateFeedUrl) }
 
     LaunchedEffect(prefs.updateFeedUrl) {
         if (updateSourceText.isBlank() && prefs.updateFeedUrl.isNotBlank()) {
             updateSourceText = prefs.updateFeedUrl
+        }
+    }
+
+    // Hoisted outside LazyColumn so Activity result callbacks never detach during scrolling or recomposition
+    val driveConsentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult(),
+    ) { activityResult ->
+        val action = viewModel.consumePendingDriveAction()
+        val tokenResult = GoogleAuthManager.extractAccessTokenFromIntent(
+            context = context,
+            resultCode = activityResult.resultCode,
+            intent = activityResult.data,
+        )
+        tokenResult
+            .onSuccess { accessToken ->
+                viewModel.completeDriveAction(action = action, accessToken = accessToken)
+            }
+            .onFailure { error ->
+                viewModel.setDriveBackupError(
+                    error.localizedMessage ?: "Google Drive authorization was cancelled."
+                )
+            }
+    }
+
+    val localExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri != null) {
+            viewModel.exportLocalBackupToUri(uri)
+        }
+    }
+
+    val localImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            viewModel.importLocalBackupFromUri(uri)
+        }
+    }
+
+    fun startDriveAction(action: PendingDriveAction, requireSignInFirst: Boolean) {
+        val activity = hostActivity
+        if (activity == null) {
+            viewModel.setDriveBackupError("Unable to access Activity context for Google Sign-In.")
+            return
+        }
+
+        // Launch on Activity lifecycleScope (never LazyColumn item scope) so recomposition cannot cancel sign-in
+        activity.lifecycleScope.launch {
+            viewModel.setDriveBackupBusy(
+                when (action) {
+                    PendingDriveAction.SIGN_IN_AND_CHECK -> context.getString(R.string.backup_signing_in)
+                    PendingDriveAction.BACKUP_NOW -> context.getString(R.string.backup_in_progress)
+                    PendingDriveAction.RESTORE_NOW -> context.getString(R.string.backup_restoring)
+                }
+            )
+
+            if (requireSignInFirst) {
+                when (val credResult = GoogleAuthManager.signInWithCredentialManager(activity)) {
+                    is CredentialSignInResult.Success -> {
+                        viewModel.setPendingSignedInAccount(
+                            email = credResult.email,
+                            displayName = credResult.displayName,
+                        )
+                    }
+                    CredentialSignInResult.Cancelled -> {
+                        viewModel.clearDriveBusyState()
+                        return@launch
+                    }
+                    is CredentialSignInResult.FallbackToAuthClient -> {
+                        // Proceed directly to Play Services AuthorizationClient which handles account picker & consent
+                    }
+                }
+            }
+
+            when (val authResult = GoogleAuthManager.authorizeDriveAccess(activity)) {
+                is DriveAuthResult.Authorized -> {
+                    viewModel.completeDriveAction(action = action, accessToken = authResult.accessToken)
+                }
+                is DriveAuthResult.NeedsConsent -> {
+                    viewModel.setPendingDriveAction(action)
+                    try {
+                        driveConsentLauncher.launch(
+                            IntentSenderRequest.Builder(authResult.intentSender).build()
+                        )
+                    } catch (e: Exception) {
+                        viewModel.setDriveBackupError(
+                            e.localizedMessage ?: "Could not open Google consent prompt."
+                        )
+                    }
+                }
+                DriveAuthResult.Cancelled -> {
+                    viewModel.clearDriveBusyState()
+                }
+                is DriveAuthResult.Error -> {
+                    viewModel.setDriveBackupError(authResult.message)
+                }
+            }
         }
     }
 
@@ -130,7 +241,31 @@ fun SettingsScreen(
 
             // 1. Google Sign-In & Drive Backup Section
             item {
-                GoogleDriveBackupCard(viewModel = viewModel)
+                GoogleDriveBackupCard(
+                    prefs = prefs,
+                    backupState = backupState,
+                    onSignInClick = {
+                        startDriveAction(
+                            action = PendingDriveAction.SIGN_IN_AND_CHECK,
+                            requireSignInFirst = true,
+                        )
+                    },
+                    onSignOutClick = viewModel::signOutGoogleAccount,
+                    onBackupNowClick = {
+                        startDriveAction(
+                            action = PendingDriveAction.BACKUP_NOW,
+                            requireSignInFirst = false,
+                        )
+                    },
+                    onRestoreNowClick = {
+                        startDriveAction(
+                            action = PendingDriveAction.RESTORE_NOW,
+                            requireSignInFirst = false,
+                        )
+                    },
+                    onLocalExportClick = { localExportLauncher.launch("quietdrawer-backup.json") },
+                    onLocalImportClick = { localImportLauncher.launch(arrayOf("application/json", "*/*")) },
+                )
             }
 
             // 2. Appearance Section (Light / Dark / Match System + Dynamic Color)
@@ -572,4 +707,10 @@ private fun SettingsSwitchRow(
             modifier = Modifier.testTag(testTag),
         )
     }
+}
+
+private tailrec fun Context.findComponentActivity(): ComponentActivity? = when (this) {
+    is ComponentActivity -> this
+    is ContextWrapper -> baseContext.findComponentActivity()
+    else -> null
 }
