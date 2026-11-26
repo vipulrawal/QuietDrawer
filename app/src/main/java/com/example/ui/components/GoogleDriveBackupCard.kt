@@ -1,5 +1,8 @@
 package com.example.ui.components
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -16,11 +19,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.FileDownload
 import androidx.compose.material.icons.rounded.FileUpload
@@ -50,10 +55,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.BuildConfig
 import com.example.R
+import com.example.backup.GoogleAuthManager
 import com.example.data.prefs.UserPreferences
 import com.example.ui.DriveBackupUiState
 import com.example.ui.util.TimeFormatter
+import com.example.update.UpdateChecker
 
 /**
  * Pure presentation card for Google Sign-In, Google Drive Backup & Restore, and local JSON backup.
@@ -70,9 +78,11 @@ fun GoogleDriveBackupCard(
     onRestoreNowClick: () -> Unit,
     onLocalExportClick: () -> Unit,
     onLocalImportClick: () -> Unit,
+    onFeedbackMessage: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val appSha1 = remember(context) { GoogleAuthManager.getAppSigningSha1(context) }
     var showRestoreConfirm by remember { mutableStateOf(false) }
 
     val isSignedIn = !prefs.signedInEmail.isNullOrBlank()
@@ -352,23 +362,98 @@ fun GoogleDriveBackupCard(
                 }
 
                 backupState.errorMessage?.let { err ->
-                    Row(
-                        verticalAlignment = Alignment.Top,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.ErrorOutline,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier
-                                .padding(top = 1.dp)
-                                .size(16.dp),
-                        )
-                        Text(
-                            text = err,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                        )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.ErrorOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier
+                                    .padding(top = 1.dp)
+                                    .size(16.dp),
+                            )
+                            Text(
+                                text = err,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+
+                        if (backupState.showOAuthSetupHelper && !appSha1.isNullOrBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(12.dp),
+                                ) {
+                                    Text(
+                                        text = "Android OAuth details for this build",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Text(
+                                        text = "Package: ${BuildConfig.APPLICATION_ID}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        text = "SHA-1: $appSha1",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.fillMaxWidth(),
+                                    ) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                                clipboard?.setPrimaryClip(ClipData.newPlainText("QuietDrawer SHA-1", appSha1))
+                                                onFeedbackMessage("Copied SHA-1 fingerprint")
+                                            },
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.testTag("copy_oauth_sha1_button"),
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.ContentCopy,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp),
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Copy SHA-1")
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                val opened = UpdateChecker.openReleaseUrl(
+                                                    context,
+                                                    "https://console.cloud.google.com/apis/credentials?project=gen-lang-client-0984680442",
+                                                )
+                                                if (!opened) {
+                                                    onFeedbackMessage("Could not open Google Cloud Console")
+                                                }
+                                            },
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.testTag("open_cloud_console_button"),
+                                        ) {
+                                            Text("Cloud Console")
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 

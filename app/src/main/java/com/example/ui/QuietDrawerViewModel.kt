@@ -8,7 +8,6 @@ import com.example.QuietDrawerApplication
 import com.example.apps.InstalledAppInfo
 import com.example.backup.BackupSerializer
 import com.example.backup.DriveBackupMetadata
-import com.example.backup.GoogleAuthManager
 import com.example.backup.QuietDrawerBackupData
 import com.example.data.local.NotificationEntity
 import com.example.data.model.AppFilterTab
@@ -75,6 +74,7 @@ data class DriveBackupUiState(
     val cloudBackup: DriveBackupMetadata? = null,
     val statusMessage: String? = null,
     val errorMessage: String? = null,
+    val showOAuthSetupHelper: Boolean = false,
 )
 
 class QuietDrawerViewModel(application: Application) : AndroidViewModel(application) {
@@ -635,7 +635,10 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun setDriveBackupError(message: String) {
+    fun setDriveBackupError(
+        message: String,
+        showOAuthSetupHelper: Boolean = false,
+    ) {
         pendingAccountEmail = null
         pendingAccountDisplayName = null
         _driveBackupState.update {
@@ -644,6 +647,7 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
                 busyMessage = null,
                 errorMessage = message,
                 statusMessage = null,
+                showOAuthSetupHelper = showOAuthSetupHelper,
             )
         }
     }
@@ -652,7 +656,6 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             pendingAccountEmail = null
             pendingAccountDisplayName = null
-            GoogleAuthManager.signOut(app)
             prefsRepo.setSignedInAccount(email = null, displayName = null)
             _driveBackupState.value = DriveBackupUiState(
                 statusMessage = "Signed out of Google account",

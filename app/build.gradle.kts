@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.quietdrawer.mrvkxp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 5
-    versionName = "1.1.3"
+    versionCode = 6
+    versionName = "1.1.4"
 
     val oauthConfigFile = file("${rootDir}/firebase-applet-config.json")
     val oauthClientId =
@@ -124,10 +124,10 @@ dependencies {
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 
-  // Google Sign-In via Credential Manager & Google Drive OAuth via AuthorizationClient:
-  implementation(libs.androidx.credentials)
-  implementation(libs.androidx.credentials.play.services)
-  implementation(libs.googleid)
+  // Google Drive Sign-In & OAuth via Play Services AuthorizationClient:
+  // implementation(libs.androidx.credentials)
+  // implementation(libs.androidx.credentials.play.services)
+  // implementation(libs.googleid)
   implementation(libs.play.services.auth)
   // implementation(libs.firebase.appcheck.recaptcha)
   // implementation(libs.firebase.appcheck.debug)

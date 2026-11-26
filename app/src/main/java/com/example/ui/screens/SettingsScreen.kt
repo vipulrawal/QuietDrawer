@@ -71,8 +71,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.example.BuildConfig
 import com.example.R
-import com.example.backup.CredentialSignInResult
 import com.example.backup.DriveAuthResult
+import com.example.backup.DriveTokenFailure
 import com.example.backup.GoogleAuthManager
 import com.example.data.model.ThemeMode
 import com.example.service.QuietNotificationListenerService
@@ -121,8 +121,10 @@ fun SettingsScreen(
                 viewModel.completeDriveAction(action = action, accessToken = accessToken)
             }
             .onFailure { error ->
+                val isOAuthConfig = (error as? DriveTokenFailure)?.isOAuthConfigError ?: false
                 viewModel.setDriveBackupError(
-                    error.localizedMessage ?: "Google Drive authorization was cancelled."
+                    message = error.localizedMessage ?: "Google Drive authorization did not complete.",
+                    showOAuthSetupHelper = isOAuthConfig,
                 )
             }
     }
@@ -143,7 +145,7 @@ fun SettingsScreen(
         }
     }
 
-    fun startDriveAction(action: PendingDriveAction, requireSignInFirst: Boolean) {
+    fun startDriveAction(action: PendingDriveAction) {
         val activity = hostActivity
         if (activity == null) {
             viewModel.setDriveBackupError("Unable to access Activity context for Google Sign-In.")
@@ -160,24 +162,6 @@ fun SettingsScreen(
                 }
             )
 
-            if (requireSignInFirst) {
-                when (val credResult = GoogleAuthManager.signInWithCredentialManager(activity)) {
-                    is CredentialSignInResult.Success -> {
-                        viewModel.setPendingSignedInAccount(
-                            email = credResult.email,
-                            displayName = credResult.displayName,
-                        )
-                    }
-                    CredentialSignInResult.Cancelled -> {
-                        viewModel.clearDriveBusyState()
-                        return@launch
-                    }
-                    is CredentialSignInResult.FallbackToAuthClient -> {
-                        // Proceed directly to Play Services AuthorizationClient which handles account picker & consent
-                    }
-                }
-            }
-
             when (val authResult = GoogleAuthManager.authorizeDriveAccess(activity)) {
                 is DriveAuthResult.Authorized -> {
                     viewModel.completeDriveAction(action = action, accessToken = authResult.accessToken)
@@ -190,15 +174,16 @@ fun SettingsScreen(
                         )
                     } catch (e: Exception) {
                         viewModel.setDriveBackupError(
-                            e.localizedMessage ?: "Could not open Google consent prompt."
+                            message = e.localizedMessage ?: "Could not open Google consent prompt.",
+                            showOAuthSetupHelper = true,
                         )
                     }
                 }
-                DriveAuthResult.Cancelled -> {
-                    viewModel.clearDriveBusyState()
-                }
                 is DriveAuthResult.Error -> {
-                    viewModel.setDriveBackupError(authResult.message)
+                    viewModel.setDriveBackupError(
+                        message = authResult.message,
+                        showOAuthSetupHelper = authResult.isOAuthConfigError,
+                    )
                 }
             }
         }
@@ -248,27 +233,13 @@ fun SettingsScreen(
                 GoogleDriveBackupCard(
                     prefs = prefs,
                     backupState = backupState,
-                    onSignInClick = {
-                        startDriveAction(
-                            action = PendingDriveAction.SIGN_IN_AND_CHECK,
-                            requireSignInFirst = true,
-                        )
-                    },
+                    onSignInClick = { startDriveAction(PendingDriveAction.SIGN_IN_AND_CHECK) },
                     onSignOutClick = viewModel::signOutGoogleAccount,
-                    onBackupNowClick = {
-                        startDriveAction(
-                            action = PendingDriveAction.BACKUP_NOW,
-                            requireSignInFirst = false,
-                        )
-                    },
-                    onRestoreNowClick = {
-                        startDriveAction(
-                            action = PendingDriveAction.RESTORE_NOW,
-                            requireSignInFirst = false,
-                        )
-                    },
+                    onBackupNowClick = { startDriveAction(PendingDriveAction.BACKUP_NOW) },
+                    onRestoreNowClick = { startDriveAction(PendingDriveAction.RESTORE_NOW) },
                     onLocalExportClick = { localExportLauncher.launch("quietdrawer-backup.json") },
                     onLocalImportClick = { localImportLauncher.launch(arrayOf("application/json", "*/*")) },
+                    onFeedbackMessage = viewModel::emitFeedbackMessage,
                 )
             }
 
