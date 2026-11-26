@@ -61,9 +61,12 @@ class UpdateChecker {
         try {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    return@withContext UpdateCheckResult.Error(
+                    val hint = if (response.code == 404 && resolvedUrl.startsWith("https://api.github.com/")) {
+                        "Release check returned HTTP 404 (repo is private, name is misspelled, or no release has been published yet)."
+                    } else {
                         "Release check returned HTTP ${response.code}."
-                    )
+                    }
+                    return@withContext UpdateCheckResult.Error(hint)
                 }
                 val body = response.body?.string().orEmpty()
                 if (body.isBlank()) {
@@ -79,13 +82,27 @@ class UpdateChecker {
     }
 
     private fun resolveEndpointUrl(source: String): String? {
-        if (source.startsWith("https://", ignoreCase = true)) {
-            return source
+        val cleaned = source.trim().trimEnd('/')
+        // Normalize full GitHub web URLs (e.g. https://github.com/owner/repo[/releases...])
+        val githubWebMatch = Regex(
+            "^https?://(?:www\\.)?github\\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\\.git)?(?:/.*)?$",
+            RegexOption.IGNORE_CASE,
+        ).matchEntire(cleaned)
+        if (githubWebMatch != null) {
+            val owner = githubWebMatch.groupValues[1]
+            val repo = githubWebMatch.groupValues[2]
+            return "https://api.github.com/repos/$owner/$repo/releases/latest"
         }
-        // Support shorthand "owner/repo" for GitHub Releases
+
+        if (cleaned.startsWith("https://", ignoreCase = true)) {
+            return cleaned
+        }
+
+        // Support shorthand "owner/repo" (also tolerating trailing .git or leading/trailing slashes)
+        val trimmedRepo = cleaned.trim('/').removeSuffix(".git")
         val githubRepoPattern = Regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-        if (githubRepoPattern.matches(source)) {
-            return "https://api.github.com/repos/$source/releases/latest"
+        if (githubRepoPattern.matches(trimmedRepo)) {
+            return "https://api.github.com/repos/$trimmedRepo/releases/latest"
         }
         return null
     }

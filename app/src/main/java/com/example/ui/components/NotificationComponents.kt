@@ -53,6 +53,9 @@ import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -156,23 +159,36 @@ fun MultiSelectSwipeArchiveBar(
     modifier: Modifier = Modifier,
 ) {
     val haptics = LocalHapticFeedback.current
+    val latestSelectedCount = rememberUpdatedState(selectedCount)
+    val latestOnArchiveSelected = rememberUpdatedState(onArchiveSelected)
+    val hasTriggered = remember { mutableStateOf(false) }
+
     val swipeState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.StartToEnd || value == SwipeToDismissBoxValue.EndToStart) {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                onArchiveSelected()
-                true
-            } else {
-                false
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd,
+                SwipeToDismissBoxValue.EndToStart -> {
+                    if (latestSelectedCount.value > 0 && !hasTriggered.value) {
+                        hasTriggered.value = true
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        latestOnArchiveSelected.value()
+                        true
+                    } else {
+                        false
+                    }
+                }
+                SwipeToDismissBoxValue.Settled -> true
             }
-        }
+        },
+        positionalThreshold = { totalDistance -> totalDistance * 0.35f },
     )
 
-    // Ensure swipe state resets if selection count changes
-    LaunchedEffect(selectedCount) {
+    // Always snap back to Settled when selection changes or after an archive swipe
+    LaunchedEffect(selectedCount, hasTriggered.value) {
         if (swipeState.currentValue != SwipeToDismissBoxValue.Settled) {
             swipeState.snapTo(SwipeToDismissBoxValue.Settled)
         }
+        hasTriggered.value = false
     }
 
     Surface(
@@ -220,12 +236,17 @@ fun MultiSelectSwipeArchiveBar(
                 }
                 IconButton(
                     onClick = onArchiveSelected,
+                    enabled = selectedCount > 0,
                     modifier = Modifier.testTag("multi_select_archive_button"),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Archive,
                         contentDescription = stringResource(R.string.action_archive),
-                        tint = MaterialTheme.colorScheme.primary,
+                        tint = if (selectedCount > 0) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        },
                     )
                 }
             }
@@ -233,8 +254,8 @@ fun MultiSelectSwipeArchiveBar(
             // Dedicated left-or-right swipe strip to archive all multi-selected notifications
             SwipeToDismissBox(
                 state = swipeState,
-                enableDismissFromStartToEnd = true,
-                enableDismissFromEndToStart = true,
+                enableDismissFromStartToEnd = selectedCount > 0,
+                enableDismissFromEndToStart = selectedCount > 0,
                 backgroundContent = {
                     ArchiveSwipeBackground(
                         label = stringResource(R.string.action_archive),
@@ -295,6 +316,8 @@ fun MultiSelectSwipeArchiveBar(
 
 /**
  * Level 2 Archival: Swipe left or right on the App Group header to archive the entire group.
+ * Disabled while multi-select mode is active so selecting/swiping individual notifications
+ * can never accidentally archive the whole group.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -311,25 +334,45 @@ fun SwipeableAppGroupHeader(
 ) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
+    val latestIsSelectionMode = rememberUpdatedState(isSelectionMode)
+    val latestOnArchiveGroup = rememberUpdatedState(onArchiveGroup)
+    val hasTriggered = remember { mutableStateOf(false) }
+
     val swipeState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.StartToEnd || value == SwipeToDismissBoxValue.EndToStart) {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                onArchiveGroup()
-                true
-            } else {
-                false
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd,
+                SwipeToDismissBoxValue.EndToStart -> {
+                    if (!latestIsSelectionMode.value && !hasTriggered.value) {
+                        hasTriggered.value = true
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        latestOnArchiveGroup.value()
+                        true
+                    } else {
+                        false
+                    }
+                }
+                SwipeToDismissBoxValue.Settled -> true
             }
-        }
+        },
+        positionalThreshold = { totalDistance -> totalDistance * 0.45f },
     )
+
+    // Reset saved dismiss state on Undo, re-entry, or when group notifications change
+    LaunchedEffect(group.packageName, group.notifications.size, isSelectionMode) {
+        hasTriggered.value = false
+        if (swipeState.currentValue != SwipeToDismissBoxValue.Settled) {
+            swipeState.snapTo(SwipeToDismissBoxValue.Settled)
+        }
+    }
 
     val allInGroupSelected = group.notifications.isNotEmpty() &&
         group.notifications.all { it.id in selectedIds }
 
     SwipeToDismissBox(
         state = swipeState,
-        enableDismissFromStartToEnd = true,
-        enableDismissFromEndToStart = true,
+        enableDismissFromStartToEnd = !isSelectionMode,
+        enableDismissFromEndToStart = !isSelectionMode,
         backgroundContent = {
             ArchiveSwipeBackground(
                 label = "${stringResource(R.string.action_archive_group)} (${group.notifications.size})",
@@ -342,9 +385,7 @@ fun SwipeableAppGroupHeader(
             .testTag("app_group_header_${group.packageName}"),
     ) {
         Surface(
-            onClick = {
-                if (isSelectionMode) onToggleGroupSelect() else onToggleExpand()
-            },
+            onClick = onToggleExpand,
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surfaceContainerLow,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
@@ -359,7 +400,9 @@ fun SwipeableAppGroupHeader(
                 if (isSelectionMode) {
                     IconButton(
                         onClick = onToggleGroupSelect,
-                        modifier = Modifier.size(36.dp),
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("select_group_checkbox_${group.packageName}"),
                     ) {
                         Icon(
                             imageVector = if (allInGroupSelected) {
@@ -375,7 +418,7 @@ fun SwipeableAppGroupHeader(
                             },
                         )
                     }
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
                 }
 
                 AppIconImage(
@@ -459,8 +502,8 @@ fun SwipeableAppGroupHeader(
 
 /**
  * Level 1 Archival (and Level 3 when in multi-select mode):
- * Swipe left or right on any individual notification to archive it (or archive all selected items
- * if this row is part of an active multi-selection).
+ * Swipe left or right on any individual notification to archive ONLY that notification
+ * (or archive ONLY the selected notifications if this row is part of an active multi-selection).
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -476,17 +519,36 @@ fun SwipeableNotificationRow(
 ) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
+    val latestOnSwipeArchive = rememberUpdatedState(onSwipeArchive)
+    val hasTriggered = remember { mutableStateOf(false) }
+
     val swipeState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.StartToEnd || value == SwipeToDismissBoxValue.EndToStart) {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                onSwipeArchive()
-                true
-            } else {
-                false
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd,
+                SwipeToDismissBoxValue.EndToStart -> {
+                    if (!hasTriggered.value) {
+                        hasTriggered.value = true
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        latestOnSwipeArchive.value()
+                        true
+                    } else {
+                        false
+                    }
+                }
+                SwipeToDismissBoxValue.Settled -> true
             }
-        }
+        },
+        positionalThreshold = { totalDistance -> totalDistance * 0.35f },
     )
+
+    // Ensure restored items (via Undo or Archive -> Restore) never stay stuck in dismissed state
+    LaunchedEffect(item.id) {
+        hasTriggered.value = false
+        if (swipeState.currentValue != SwipeToDismissBoxValue.Settled) {
+            swipeState.snapTo(SwipeToDismissBoxValue.Settled)
+        }
+    }
 
     val containerColor by animateColorAsState(
         targetValue = if (isSelected) {
@@ -647,23 +709,45 @@ fun SwipeableArchivedRow(
 ) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
+    val latestOnRestore = rememberUpdatedState(onRestore)
+    val latestOnDelete = rememberUpdatedState(onDelete)
+    val hasTriggered = remember { mutableStateOf(false) }
+
     val swipeState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             when (value) {
                 SwipeToDismissBoxValue.StartToEnd -> {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onRestore()
-                    true
+                    if (!hasTriggered.value) {
+                        hasTriggered.value = true
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        latestOnRestore.value()
+                        true
+                    } else {
+                        false
+                    }
                 }
                 SwipeToDismissBoxValue.EndToStart -> {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onDelete()
-                    true
+                    if (!hasTriggered.value) {
+                        hasTriggered.value = true
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        latestOnDelete.value()
+                        true
+                    } else {
+                        false
+                    }
                 }
-                SwipeToDismissBoxValue.Settled -> false
+                SwipeToDismissBoxValue.Settled -> true
             }
-        }
+        },
+        positionalThreshold = { totalDistance -> totalDistance * 0.35f },
     )
+
+    LaunchedEffect(item.id) {
+        hasTriggered.value = false
+        if (swipeState.currentValue != SwipeToDismissBoxValue.Settled) {
+            swipeState.snapTo(SwipeToDismissBoxValue.Settled)
+        }
+    }
 
     SwipeToDismissBox(
         state = swipeState,
