@@ -102,6 +102,10 @@
     <string name="settings_check_updates">Check for Updates</string>
     <string name="settings_checking_updates">Checking…</string>
     <string name="settings_open_update">Open Update Release</string>
+    <string name="settings_download_apk">Download APK</string>
+    <string name="settings_download_apk_sized">Download APK (%1$s)</string>
+    <string name="settings_release_page">Release</string>
+    <string name="settings_direct_apk_hint">Downloads %1$s directly (no unzipping). Tap Open once finished to update in place.</string>
     <string name="settings_update_info_note">QuietDrawer uses a stable package ID so installing any future signed release APK updates in-place without losing your filters or history.</string>
 
     <!-- Google Sign-In & Drive Backup -->

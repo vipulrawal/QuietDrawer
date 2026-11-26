@@ -33,6 +33,7 @@ import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.BrightnessAuto
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DarkMode
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.NotificationsActive
@@ -99,6 +100,9 @@ fun SettingsScreen(
     LaunchedEffect(prefs.updateFeedUrl) {
         if (updateSourceText.isBlank() && prefs.updateFeedUrl.isNotBlank()) {
             updateSourceText = prefs.updateFeedUrl
+        }
+        if (prefs.updateFeedUrl.isNotBlank() && updateResult is UpdateCheckResult.Idle) {
+            viewModel.checkForUpdates(prefs.updateFeedUrl)
         }
     }
 
@@ -573,6 +577,9 @@ fun SettingsScreen(
                         }
                         is UpdateCheckResult.UpdateAvailable -> {
                             Spacer(modifier = Modifier.height(12.dp))
+                            val formattedSize = UpdateChecker.formatApkSize(result.apkSizeBytes)
+                            val primaryUrl = result.apkDownloadUrl ?: result.releaseUrl
+                            val hasDirectApk = !result.apkDownloadUrl.isNullOrBlank()
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
@@ -580,7 +587,7 @@ fun SettingsScreen(
                             ) {
                                 Column(
                                     modifier = Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
                                     Text(
                                         text = "Update available: ${result.latestVersion}",
@@ -592,22 +599,73 @@ fun SettingsScreen(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    OutlinedButton(
-                                        onClick = {
-                                            val opened = UpdateChecker.openReleaseUrl(context, result.releaseUrl)
-                                            if (!opened) {
-                                                viewModel.emitFeedbackMessage("Could not open release URL")
-                                            }
-                                        },
-                                        shape = RoundedCornerShape(10.dp),
-                                        modifier = Modifier.testTag("open_update_release_button"),
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth(),
                                     ) {
-                                        Text(stringResource(R.string.settings_open_update))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp),
+                                        Button(
+                                            onClick = {
+                                                val opened = UpdateChecker.openReleaseUrl(context, primaryUrl)
+                                                if (!opened) {
+                                                    viewModel.emitFeedbackMessage("Could not open download link")
+                                                }
+                                            },
+                                            shape = RoundedCornerShape(10.dp),
+                                            modifier = Modifier.testTag("open_update_release_button"),
+                                        ) {
+                                            Icon(
+                                                imageVector = if (hasDirectApk) {
+                                                    Icons.Rounded.Download
+                                                } else {
+                                                    Icons.AutoMirrored.Rounded.OpenInNew
+                                                },
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = if (hasDirectApk) {
+                                                    if (formattedSize != null) {
+                                                        stringResource(R.string.settings_download_apk_sized, formattedSize)
+                                                    } else {
+                                                        stringResource(R.string.settings_download_apk)
+                                                    }
+                                                } else {
+                                                    stringResource(R.string.settings_open_update)
+                                                }
+                                            )
+                                        }
+
+                                        if (hasDirectApk && result.releaseUrl.isNotBlank()) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    val opened = UpdateChecker.openReleaseUrl(context, result.releaseUrl)
+                                                    if (!opened) {
+                                                        viewModel.emitFeedbackMessage("Could not open release page")
+                                                    }
+                                                },
+                                                shape = RoundedCornerShape(10.dp),
+                                                modifier = Modifier.testTag("view_release_notes_button"),
+                                            ) {
+                                                Text(stringResource(R.string.settings_release_page))
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Icon(
+                                                    imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(15.dp),
+                                                )
+                                            }
+                                        }
+                                    }
+                                    if (hasDirectApk) {
+                                        Text(
+                                            text = stringResource(
+                                                R.string.settings_direct_apk_hint,
+                                                result.apkFileName ?: "QuietDrawer.apk",
+                                            ),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
                                 }

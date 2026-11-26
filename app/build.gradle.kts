@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.quietdrawer.mrvkxp"
     minSdk = 24
     targetSdk = 36
-    versionCode = 4
-    versionName = "1.1.2"
+    versionCode = 5
+    versionName = "1.1.3"
 
     val oauthConfigFile = file("${rootDir}/firebase-applet-config.json")
     val oauthClientId =

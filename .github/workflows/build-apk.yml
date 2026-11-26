@@ -40,25 +40,33 @@ jobs:
           gradle-version: "9.3.1"
 
       - name: Restore consistent signing keystore
+        id: keystore
+        env:
+          SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
         run: |
-          if [ -f debug.keystore.base64 ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
+          if [ -n "$SIGNING_KEYSTORE_BASE64" ]; then
+            printf '%s' "$SIGNING_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > debug.keystore
+            echo "Restored debug.keystore from SIGNING_KEYSTORE_BASE64 secret."
+          elif [ -f debug.keystore.base64 ]; then
+            tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
+            echo "Restored debug.keystore from repository debug.keystore.base64."
           else
-            keytool -genkey -v \
-              -keystore debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=QuietDrawer,O=QuietDrawer,C=US"
+            echo "::error::Missing debug.keystore.base64 and SIGNING_KEYSTORE_BASE64 secret. Refusing to generate a random signing key that would cause 'App not installed' signature conflicts on update."
+            exit 1
           fi
+
+          SHA1=$(keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -m1 'SHA1:' | awk '{print $2}')
+          if [ -z "$SHA1" ]; then
+            echo "::error::Decoded debug.keystore is invalid or missing alias androiddebugkey."
+            exit 1
+          fi
+          echo "Verified consistent signing key SHA-1: $SHA1"
+          echo "sha1=$SHA1" >> "$GITHUB_OUTPUT"
 
       - name: Build installable APK
         run: gradle :app:assembleDebug --no-daemon
 
-      - name: Prepare versioned APK asset
+      - name: Verify APK signature & prepare release asset
         id: pkg
         run: |
           VERSION_NAME=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
@@ -72,30 +80,31 @@ jobs:
           fi
           APK_NAME="QuietDrawer-${TAG}.apk"
           cp app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
+
+          APKSIGNER=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -x "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs "$APK_NAME"
+          fi
+
           echo "version=$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "apk_name=$APK_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.pkg.outputs.apk_name }}
-          path: ${{ steps.pkg.outputs.apk_name }}
-
-      - name: Publish APK to GitHub Releases
+      - name: Publish raw APK to GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.pkg.outputs.tag }}
           VERSION: ${{ steps.pkg.outputs.version }}
           APK_NAME: ${{ steps.pkg.outputs.apk_name }}
+          KEY_SHA1: ${{ steps.keystore.outputs.sha1 }}
         run: |
           NOTES=$(printf '%s\n' \
-            "Installable Android APK for **QuietDrawer ${TAG}** (Build #${GITHUB_RUN_NUMBER})." \
+            "Ready-to-install Android APK for **QuietDrawer ${TAG}** (Build #${GITHUB_RUN_NUMBER})." \
             "" \
-            "### How to install on Pixel" \
-            "1. Download \`${APK_NAME}\` directly on your phone (or send it via Quick Share)." \
-            "2. Tap the downloaded APK to install (updates seamlessly over previous QuietDrawer builds)." \
-            "3. On first install, allow Notification Access. If Android marks it as a restricted setting, open **Settings → Apps → QuietDrawer → ⋮ → Allow restricted settings** first.")
+            "### How to install or update (no unzipping required)" \
+            "1. Tap **Download APK** inside QuietDrawer Settings → App Updates, or tap \`${APK_NAME}\` under **Assets** below." \
+            "2. Open the downloaded \`.apk\` file to install in place." \
+            "3. If Android shows **App not installed** (only happens if upgrading from an older mismatched signing key), back up in **Settings → Google Drive / Save local copy**, uninstall the older QuietDrawer once, and install \`${APK_NAME}\`. All future releases share the same signing key (\`${KEY_SHA1}\`) and update seamlessly in place.")
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$APK_NAME" --clobber

@@ -5,12 +5,14 @@ import android.content.Intent
 import android.net.Uri
 import com.example.BuildConfig
 import java.io.IOException
+import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 sealed interface UpdateCheckResult {
     data object Idle : UpdateCheckResult
@@ -20,17 +22,34 @@ sealed interface UpdateCheckResult {
         val latestVersion: String,
         val releaseNotes: String,
         val releaseUrl: String,
-        val publishedAt: String?,
+        val apkDownloadUrl: String? = null,
+        val apkFileName: String? = null,
+        val apkSizeBytes: Long? = null,
+        val publishedAt: String? = null,
     ) : UpdateCheckResult
     data class Error(val message: String) : UpdateCheckResult
+}
+
+private sealed interface ResolvedUpdateSource {
+    data class GitHubRepo(val owner: String, val repo: String) : ResolvedUpdateSource {
+        val latestReleaseApiUrl: String
+            get() = "https://api.github.com/repos/$owner/$repo/releases/latest"
+        val releasesListApiUrl: String
+            get() = "https://api.github.com/repos/$owner/$repo/releases?per_page=1"
+        val releasesWebUrl: String
+            get() = "https://github.com/$owner/$repo/releases"
+    }
+
+    data class CustomFeedUrl(val url: String) : ResolvedUpdateSource
 }
 
 /**
  * Play-policy-compliant update checker.
  *
- * Queries either a GitHub Releases endpoint (when given "owner/repo") or a custom JSON release
- * manifest URL over HTTPS, compares semantic versions against [BuildConfig.VERSION_NAME], and
- * opens the release page via [Intent.ACTION_VIEW] for one-click seamless in-place updates.
+ * Queries either a GitHub Releases endpoint (when given "owner/repo" or a github.com URL) or a
+ * custom HTTPS JSON release manifest, compares semantic versions against [BuildConfig.VERSION_NAME],
+ * extracts any direct `.apk` release asset URL (no zipping required), and opens the download/release
+ * URL via [Intent.ACTION_VIEW].
  */
 class UpdateChecker {
 
@@ -47,32 +66,15 @@ class UpdateChecker {
             )
         }
 
-        val resolvedUrl = resolveEndpointUrl(source)
+        val resolved = resolveSource(source)
             ?: return@withContext UpdateCheckResult.Error(
                 "Enter a valid https:// URL or GitHub owner/repo."
             )
 
-        val request = Request.Builder()
-            .url(resolvedUrl)
-            .header("Accept", "application/vnd.github+json, application/json")
-            .header("User-Agent", "QuietDrawer/${BuildConfig.VERSION_NAME}")
-            .build()
-
         try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    val hint = if (response.code == 404 && resolvedUrl.startsWith("https://api.github.com/")) {
-                        "Release check returned HTTP 404 (repo is private, name is misspelled, or no release has been published yet)."
-                    } else {
-                        "Release check returned HTTP ${response.code}."
-                    }
-                    return@withContext UpdateCheckResult.Error(hint)
-                }
-                val body = response.body?.string().orEmpty()
-                if (body.isBlank()) {
-                    return@withContext UpdateCheckResult.Error("Empty response from update feed.")
-                }
-                parseUpdateResponse(body, source)
+            when (resolved) {
+                is ResolvedUpdateSource.GitHubRepo -> checkGitHubRepo(resolved)
+                is ResolvedUpdateSource.CustomFeedUrl -> checkCustomFeed(resolved.url)
             }
         } catch (e: IOException) {
             UpdateCheckResult.Error("Network error: ${e.localizedMessage ?: "Unable to reach server"}")
@@ -81,36 +83,110 @@ class UpdateChecker {
         }
     }
 
-    private fun resolveEndpointUrl(source: String): String? {
+    private fun checkGitHubRepo(repo: ResolvedUpdateSource.GitHubRepo): UpdateCheckResult {
+        val latestRequest = buildRequest(repo.latestReleaseApiUrl)
+        client.newCall(latestRequest).execute().use { response ->
+            if (response.isSuccessful) {
+                val body = response.body?.string().orEmpty()
+                if (body.isBlank()) {
+                    return UpdateCheckResult.Error("Empty response from GitHub Releases.")
+                }
+                return parseUpdateResponse(JSONObject(body), repo.releasesWebUrl)
+            }
+
+            if (response.code != 404) {
+                return UpdateCheckResult.Error("Release check returned HTTP ${response.code}.")
+            }
+        }
+
+        // Fallback to /releases?per_page=1 to handle pre-releases or detect zero published releases
+        val listRequest = buildRequest(repo.releasesListApiUrl)
+        client.newCall(listRequest).execute().use { fallbackResponse ->
+            if (fallbackResponse.isSuccessful) {
+                val body = fallbackResponse.body?.string().orEmpty()
+                val releases = JSONArray(body)
+                if (releases.length() == 0) {
+                    return UpdateCheckResult.Error(
+                        "Connected to ${repo.owner}/${repo.repo}, but no GitHub Releases have been published yet."
+                    )
+                }
+                return parseUpdateResponse(releases.getJSONObject(0), repo.releasesWebUrl)
+            }
+
+            return if (fallbackResponse.code == 404) {
+                UpdateCheckResult.Error(
+                    "Release check returned HTTP 404 (repo is private, name is misspelled, or no release exists yet)."
+                )
+            } else {
+                UpdateCheckResult.Error("Release check returned HTTP ${fallbackResponse.code}.")
+            }
+        }
+    }
+
+    private fun checkCustomFeed(url: String): UpdateCheckResult {
+        val request = buildRequest(url)
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                return UpdateCheckResult.Error("Release check returned HTTP ${response.code}.")
+            }
+            val body = response.body?.string().orEmpty()
+            if (body.isBlank()) {
+                return UpdateCheckResult.Error("Empty response from update feed.")
+            }
+            return parseUpdateResponse(JSONObject(body), url)
+        }
+    }
+
+    private fun buildRequest(url: String): Request {
+        return Request.Builder()
+            .url(url)
+            .header("Accept", "application/vnd.github+json, application/json")
+            .header("User-Agent", "QuietDrawer/${BuildConfig.VERSION_NAME}")
+            .build()
+    }
+
+    private fun resolveSource(source: String): ResolvedUpdateSource? {
         val cleaned = source.trim().trimEnd('/')
-        // Normalize full GitHub web URLs (e.g. https://github.com/owner/repo[/releases...])
+
         val githubWebMatch = Regex(
             "^https?://(?:www\\.)?github\\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\\.git)?(?:/.*)?$",
             RegexOption.IGNORE_CASE,
         ).matchEntire(cleaned)
         if (githubWebMatch != null) {
-            val owner = githubWebMatch.groupValues[1]
-            val repo = githubWebMatch.groupValues[2]
-            return "https://api.github.com/repos/$owner/$repo/releases/latest"
+            return ResolvedUpdateSource.GitHubRepo(
+                owner = githubWebMatch.groupValues[1],
+                repo = githubWebMatch.groupValues[2],
+            )
+        }
+
+        val githubApiMatch = Regex(
+            "^https://api\\.github\\.com/repos/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)(?:/.*)?$",
+            RegexOption.IGNORE_CASE,
+        ).matchEntire(cleaned)
+        if (githubApiMatch != null) {
+            return ResolvedUpdateSource.GitHubRepo(
+                owner = githubApiMatch.groupValues[1],
+                repo = githubApiMatch.groupValues[2],
+            )
         }
 
         if (cleaned.startsWith("https://", ignoreCase = true)) {
-            return cleaned
+            return ResolvedUpdateSource.CustomFeedUrl(cleaned)
         }
 
-        // Support shorthand "owner/repo" (also tolerating trailing .git or leading/trailing slashes)
         val trimmedRepo = cleaned.trim('/').removeSuffix(".git")
-        val githubRepoPattern = Regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-        if (githubRepoPattern.matches(trimmedRepo)) {
-            return "https://api.github.com/repos/$trimmedRepo/releases/latest"
+        val githubRepoPattern = Regex("^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)$")
+        val repoMatch = githubRepoPattern.matchEntire(trimmedRepo)
+        if (repoMatch != null) {
+            return ResolvedUpdateSource.GitHubRepo(
+                owner = repoMatch.groupValues[1],
+                repo = repoMatch.groupValues[2],
+            )
         }
         return null
     }
 
-    private fun parseUpdateResponse(body: String, fallbackSource: String): UpdateCheckResult {
-        val json = JSONObject(body)
-
-        // Supports both GitHub Releases schema and simple custom manifest schema
+    private fun parseUpdateResponse(json: JSONObject, fallbackWebUrl: String): UpdateCheckResult {
         val remoteVersion = json.optString("tag_name").ifBlank {
             json.optString("versionName").ifBlank { json.optString("version") }
         }.trim()
@@ -126,13 +202,14 @@ class UpdateChecker {
         }.trim()
 
         val releaseUrl = json.optString("html_url").ifBlank {
-            json.optString("downloadUrl").ifBlank {
-                json.optString("url").ifBlank {
-                    if (fallbackSource.startsWith("https://")) fallbackSource
-                    else "https://github.com/$fallbackSource/releases/latest"
-                }
-            }
+            json.optString("releaseUrl").ifBlank { fallbackWebUrl }
         }.trim()
+
+        // Extract direct raw .apk asset URL so users never have to browse GitHub or unzip an artifact
+        val apkAsset = extractApkAsset(json)
+        val directApkUrl = apkAsset?.downloadUrl
+            ?: json.optString("apkUrl").trim().takeIf { isValidHttpsApkUrl(it) }
+            ?: json.optString("downloadUrl").trim().takeIf { isValidHttpsApkUrl(it) }
 
         val publishedAt = json.optString("published_at").ifBlank {
             json.optString("publishedAt")
@@ -149,11 +226,50 @@ class UpdateChecker {
                 latestVersion = remoteVersion.ifBlank { "Build $remoteVersionCode" },
                 releaseNotes = releaseNotes,
                 releaseUrl = releaseUrl,
+                apkDownloadUrl = directApkUrl,
+                apkFileName = apkAsset?.fileName,
+                apkSizeBytes = apkAsset?.sizeBytes,
                 publishedAt = publishedAt,
             )
         } else {
             UpdateCheckResult.UpToDate(BuildConfig.VERSION_NAME)
         }
+    }
+
+    private data class ApkAssetInfo(
+        val fileName: String,
+        val downloadUrl: String,
+        val sizeBytes: Long?,
+    )
+
+    private fun extractApkAsset(json: JSONObject): ApkAssetInfo? {
+        val assets = json.optJSONArray("assets") ?: return null
+        for (i in 0 until assets.length()) {
+            val asset = assets.optJSONObject(i) ?: continue
+            val name = asset.optString("name", "").trim()
+            val url = asset.optString("browser_download_url", "").trim()
+            if (name.endsWith(".apk", ignoreCase = true) && isValidHttpsUrl(url)) {
+                val size = asset.optLong("size", -1L).takeIf { it > 0L }
+                return ApkAssetInfo(
+                    fileName = name,
+                    downloadUrl = url,
+                    sizeBytes = size,
+                )
+            }
+        }
+        return null
+    }
+
+    private fun isValidHttpsUrl(url: String): Boolean {
+        if (!url.startsWith("https://", ignoreCase = true)) return false
+        val uri = Uri.parse(url)
+        return uri.scheme.equals("https", ignoreCase = true) && !uri.host.isNullOrBlank()
+    }
+
+    private fun isValidHttpsApkUrl(url: String): Boolean {
+        if (!isValidHttpsUrl(url)) return false
+        val path = Uri.parse(url).path.orEmpty()
+        return path.endsWith(".apk", ignoreCase = true)
     }
 
     companion object {
@@ -178,9 +294,15 @@ class UpdateChecker {
                 .map { part -> part.filter { it.isDigit() }.toIntOrNull() ?: 0 }
         }
 
+        fun formatApkSize(bytes: Long?): String? {
+            if (bytes == null || bytes <= 0L) return null
+            val mb = bytes / (1024.0 * 1024.0)
+            return String.format(Locale.US, "%.1f MB", mb)
+        }
+
         fun openReleaseUrl(context: Context, url: String): Boolean {
             val uri = Uri.parse(url)
-            if (uri.scheme != "https" && uri.scheme != "http") return false
+            if (!uri.scheme.equals("https", ignoreCase = true)) return false
             return try {
                 val intent = Intent(Intent.ACTION_VIEW, uri).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
