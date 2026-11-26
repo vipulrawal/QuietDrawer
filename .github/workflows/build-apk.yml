@@ -39,10 +39,11 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
-      - name: Restore consistent signing keystore
+      - name: Restore or initialize consistent signing keystore
         id: keystore
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -n "$SIGNING_KEYSTORE_BASE64" ]; then
             printf '%s' "$SIGNING_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > debug.keystore
@@ -50,9 +51,38 @@ jobs:
           elif [ -f debug.keystore.base64 ]; then
             tr -d '\r\n ' < debug.keystore.base64 | base64 -d > debug.keystore
             echo "Restored debug.keystore from repository debug.keystore.base64."
+          elif git fetch --depth=1 origin ci-signing:refs/remotes/origin/ci-signing 2>/dev/null \
+               && git show origin/ci-signing:debug.keystore.base64 > /tmp/ci-debug.keystore.base64 2>/dev/null; then
+            tr -d '\r\n ' < /tmp/ci-debug.keystore.base64 | base64 -d > debug.keystore
+            rm -f /tmp/ci-debug.keystore.base64
+            echo "Restored consistent debug.keystore from ci-signing branch."
           else
-            echo "::error::Missing debug.keystore.base64 and SIGNING_KEYSTORE_BASE64 secret. Refusing to generate a random signing key that would cause 'App not installed' signature conflicts on update."
-            exit 1
+            echo "First-time setup: generating one-time consistent signing keystore..."
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=QuietDrawer,O=QuietDrawer,C=US"
+
+            # Save once to an isolated orphan branch (ci-signing) so pushes to main never erase it
+            TMP_REPO=$(mktemp -d)
+            base64 debug.keystore | tr -d '\r\n' > "$TMP_REPO/debug.keystore.base64"
+            git -C "$TMP_REPO" init
+            git -C "$TMP_REPO" checkout -b ci-signing
+            git -C "$TMP_REPO" config user.name "github-actions[bot]"
+            git -C "$TMP_REPO" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C "$TMP_REPO" add debug.keystore.base64
+            git -C "$TMP_REPO" commit -m "Initialize consistent CI signing keystore"
+            BASIC_AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\r\n')
+            git -C "$TMP_REPO" \
+              -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $BASIC_AUTH" \
+              push "https://github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/ci-signing
+            rm -rf "$TMP_REPO"
+            echo "Saved consistent signing keystore to ci-signing branch for all future updates."
           fi
 
           SHA1=$(keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -m1 'SHA1:' | awk '{print $2}')
@@ -104,7 +134,7 @@ jobs:
             "### How to install or update (no unzipping required)" \
             "1. Tap **Download APK** inside QuietDrawer Settings → App Updates, or tap \`${APK_NAME}\` under **Assets** below." \
             "2. Open the downloaded \`.apk\` file to install in place." \
-            "3. If Android shows **App not installed** (only happens if upgrading from an older mismatched signing key), back up in **Settings → Google Drive / Save local copy**, uninstall the older QuietDrawer once, and install \`${APK_NAME}\`. All future releases share the same signing key (\`${KEY_SHA1}\`) and update seamlessly in place.")
+            "3. If Android shows **App not installed** (only happens once when replacing an older mismatched signing key), back up in **Settings → Google Drive / Save local copy**, uninstall the older QuietDrawer once, and install \`${APK_NAME}\`. All future releases automatically reuse the exact same signing key (\`${KEY_SHA1}\`) and update seamlessly in place.")
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$APK_NAME" --clobber
