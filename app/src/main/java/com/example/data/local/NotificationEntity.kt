@@ -24,6 +24,8 @@ data class NotificationEntity(
     val category: String? = null,
     val shortcutId: String? = null,
     val channelId: String? = null,
+    val deepLinkUrl: String? = null,
+    val personUri: String? = null,
     val postedAt: Long,
     val isArchived: Boolean = false,
     val archivedAt: Long? = null,

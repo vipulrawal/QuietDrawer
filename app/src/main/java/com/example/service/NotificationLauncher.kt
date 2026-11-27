@@ -1,8 +1,10 @@
 package com.example.service
 
+import android.app.Activity
 import android.app.ActivityOptions
 import android.app.PendingIntent
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.LauncherApps
 import android.net.Uri
@@ -20,40 +22,76 @@ sealed interface LaunchResult {
 }
 
 /**
- * 4-tier notification launcher designed so clicking a notification NEVER becomes a broken link:
- * 1. Live captured [PendingIntent] sent from the foreground Activity with BAL opt-in (API 34+).
- * 2. Conversation / dynamic shortcut launch via [LauncherApps] if shortcutId is present.
- * 3. Standard launcher Activity via [PackageManager.getLaunchIntentForPackage].
- * 4. Android App Info screen fallback for headless packages with no launcher Activity.
+ * 6-tier resilient notification launcher designed to maximize deep-link survival across
+ * status-bar hiding, Battery Saver, launcher switches, process kills, and phone reboots:
+ *
+ * 1. Cached live [PendingIntent] candidates (contentIntent + bubbleIntent, by ID / sbnKey / content)
+ *    dispatched from the foreground [Activity] context with API 34-36 BAL opt-in.
+ * 2. On-demand live re-hydration from Android's snoozed & active notification pools right at tap time.
+ * 3. Persisted `https://` [NotificationEntity.deepLinkUrl] scoped to the originating app package
+ *    (survives even full phone reboots when OS PendingIntent binders are destroyed).
+ * 4. Conversation/dynamic shortcut via [LauncherApps] (when permitted) or persisted [NotificationEntity.personUri]
+ *    scoped to the originating app package.
+ * 5. Standard launcher Activity via [PackageManager.getLaunchIntentForPackage].
+ * 6. Android App Info screen fallback for headless packages with no launcher Activity.
  */
 object NotificationLauncher {
     private const val TAG = "NotificationLauncher"
 
     fun openNotification(context: Context, item: NotificationEntity): LaunchResult {
-        // Tier 1: Live PendingIntent (preserves deep link to exact chat/email/screen)
-        val pendingIntent = PendingIntentStore.get(item.id, item.sbnKey)
-        if (pendingIntent != null) {
-            val sent = trySendPendingIntent(context, pendingIntent, item)
-            if (sent) {
+        val launchContext = context.findActivity() ?: context
+
+        // Tier 1: Cached live PendingIntent candidates (exact screen in native app)
+        val cachedCandidates = PendingIntentStore.getCandidates(
+            notificationId = item.id,
+            sbnKey = item.sbnKey,
+            packageName = item.packageName,
+            title = item.title,
+            text = item.text,
+        )
+        for (candidate in cachedCandidates) {
+            if (trySendPendingIntent(launchContext, candidate, item)) {
                 return LaunchResult.OpenedDeepLink
             }
         }
 
-        // Tier 2: Shortcut deep-link (when available and permitted)
+        // Tier 2: On-demand live re-hydration from Android's snoozed/active notifications
+        val liveCandidates = QuietNotificationListenerService.findLiveIntentsOnDemand(item)
+            .filter { live -> cachedCandidates.none { it == live } }
+        for (candidate in liveCandidates) {
+            if (trySendPendingIntent(launchContext, candidate, item)) {
+                return LaunchResult.OpenedDeepLink
+            }
+        }
+
+        // Tier 3: Persisted https:// deep link handled natively by the originating app (survives reboot)
+        if (DeepLinkExtractor.isValidDeepLinkUrl(item.deepLinkUrl)) {
+            if (tryLaunchScopedUri(launchContext, item.packageName, item.deepLinkUrl!!)) {
+                return LaunchResult.OpenedDeepLink
+            }
+        }
+
+        // Tier 4a: Conversation/dynamic shortcut (when available and permitted)
         if (!item.shortcutId.isNullOrBlank() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
-            val launchedShortcut = tryStartShortcut(context, item.packageName, item.shortcutId)
-            if (launchedShortcut) {
+            if (tryStartShortcut(launchContext, item.packageName, item.shortcutId)) {
                 return LaunchResult.OpenedDeepLink
             }
         }
 
-        // Tier 3: Originating app's primary launch intent (works forever, even after reboot or in Archive)
-        if (tryLaunchAppPackage(context, item.packageName)) {
+        // Tier 4b: Persisted safe contact URI (mailto:/tel:/smsto:) handled by originating app
+        if (DeepLinkExtractor.isValidPersonUri(item.personUri)) {
+            if (tryLaunchScopedUri(launchContext, item.packageName, item.personUri!!)) {
+                return LaunchResult.OpenedDeepLink
+            }
+        }
+
+        // Tier 5: Originating app's primary launch intent (works forever, even after reboot or in Archive)
+        if (tryLaunchAppPackage(launchContext, item.packageName)) {
             return LaunchResult.OpenedApp
         }
 
-        // Tier 4: App Info screen fallback so taps never silently fail
-        if (tryOpenAppDetails(context, item.packageName)) {
+        // Tier 6: App Info screen fallback so taps never silently fail
+        if (tryOpenAppDetails(launchContext, item.packageName)) {
             return LaunchResult.OpenedAppSettings
         }
 
@@ -67,22 +105,57 @@ object NotificationLauncher {
     ): Boolean {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val options = ActivityOptions.makeBasic()
-                    .setPendingIntentBackgroundActivityStartMode(
-                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
-                    )
-                    .toBundle()
+                val options = ActivityOptions.makeBasic().apply {
+                    if (Build.VERSION.SDK_INT >= 36) {
+                        setPendingIntentBackgroundActivityStartMode(
+                            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        setPendingIntentBackgroundActivityStartMode(
+                            ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                        )
+                    }
+                }.toBundle()
                 pendingIntent.send(context, 0, null, null, null, null, options)
             } else {
-                pendingIntent.send()
+                pendingIntent.send(context, 0, null)
             }
             true
         } catch (canceled: PendingIntent.CanceledException) {
-            Log.d(TAG, "PendingIntent expired for ${item.packageName}; falling back to app launch.")
-            PendingIntentStore.removeCanceled(item.id, item.sbnKey)
+            Log.d(TAG, "PendingIntent expired for ${item.packageName}; trying next fallback.")
+            PendingIntentStore.removeCanceled(
+                notificationId = item.id,
+                sbnKey = item.sbnKey,
+                packageName = item.packageName,
+                title = item.title,
+                text = item.text,
+                canceledIntent = pendingIntent,
+            )
             false
         } catch (e: Exception) {
             Log.w(TAG, "PendingIntent failed for ${item.packageName}: ${e.message}")
+            false
+        }
+    }
+
+    private fun tryLaunchScopedUri(
+        context: Context,
+        packageName: String,
+        uriString: String,
+    ): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uriString)).apply {
+                setPackage(packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (intent.resolveActivity(context.packageManager) == null) {
+                return false
+            }
+            context.startActivity(intent)
+            true
+        } catch (e: Exception) {
+            Log.d(TAG, "Scoped URI launch unavailable for $packageName: ${e.message}")
             false
         }
     }
@@ -134,5 +207,11 @@ object NotificationLauncher {
             Log.w(TAG, "Failed to open settings for $packageName: ${e.message}")
             false
         }
+    }
+
+    private tailrec fun Context.findActivity(): Activity? = when (this) {
+        is Activity -> this
+        is ContextWrapper -> baseContext.findActivity()
+        else -> null
     }
 }

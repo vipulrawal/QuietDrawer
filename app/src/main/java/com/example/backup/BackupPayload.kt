@@ -75,6 +75,8 @@ object BackupSerializer {
                         put("category", notif.category ?: JSONObject.NULL)
                         put("shortcutId", notif.shortcutId ?: JSONObject.NULL)
                         put("channelId", notif.channelId ?: JSONObject.NULL)
+                        put("deepLinkUrl", notif.deepLinkUrl ?: JSONObject.NULL)
+                        put("personUri", notif.personUri ?: JSONObject.NULL)
                         put("postedAt", notif.postedAt)
                         put("isArchived", notif.isArchived)
                         put("archivedAt", notif.archivedAt ?: JSONObject.NULL)
@@ -149,6 +151,8 @@ object BackupSerializer {
                         category = obj.optNullableString("category")?.take(128),
                         shortcutId = obj.optNullableString("shortcutId")?.take(256),
                         channelId = obj.optNullableString("channelId")?.take(128),
+                        deepLinkUrl = obj.optNullableString("deepLinkUrl")?.take(2_048),
+                        personUri = obj.optNullableString("personUri")?.take(512),
                         postedAt = postedAt,
                         isArchived = obj.optBoolean("isArchived", false),
                         archivedAt = if (obj.isNull("archivedAt")) null else obj.optLong("archivedAt", postedAt),

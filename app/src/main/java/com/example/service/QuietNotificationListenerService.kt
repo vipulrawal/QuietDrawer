@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -31,8 +32,13 @@ import kotlinx.coroutines.launch
  *
  * Notifications from apps marked "In Status Bar" remain untouched in Android's status bar.
  * Notifications from all other apps are saved to QuietDrawer's local Inbox, their live
- * [PendingIntent] is preserved in [PendingIntentStore], and they are quietly dismissed
- * from the status bar.
+ * [PendingIntent]s (contentIntent + bubbleIntent) are cached in [PendingIntentStore], and
+ * on Android 8+ they are hidden via [snoozeNotification] instead of [cancelNotification].
+ *
+ * Snoozing hides notifications from the status bar WITHOUT firing the originating app's
+ * deleteIntent (which would otherwise revoke the PendingIntent) and keeps the live
+ * [StatusBarNotification] inside Android's NotificationManagerService so QuietDrawer can
+ * re-hydrate deep links automatically after Battery Saver, launcher switches, or process restarts.
  */
 class QuietNotificationListenerService : NotificationListenerService() {
 
@@ -43,6 +49,9 @@ class QuietNotificationListenerService : NotificationListenerService() {
         _isConnected.value = true
         activeInstance = this
         Log.i(TAG, "QuietNotificationListenerService connected")
+        serviceScope.launch {
+            rehydrateLiveIntentsInternal()
+        }
     }
 
     override fun onListenerDisconnected() {
@@ -117,17 +126,11 @@ class QuietNotificationListenerService : NotificationListenerService() {
             }
         }
 
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
-        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()
-            ?.takeIf { it.isNotBlank() && it != text }
-        val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.trim()
-            ?.takeIf { it.isNotBlank() }
-
-        // Skip completely empty silent system pings
-        if (title.isBlank() && text.isBlank() && bigText.isNullOrBlank()) {
-            return
-        }
+        val extracted = extractNotificationContent(notification, appName) ?: return
+        val contentIntent = notification.contentIntent
+        val bubbleIntent = extractBubbleIntent(notification)
+        val deepLinkUrl = DeepLinkExtractor.extractDeepLinkUrl(extras)
+        val personUri = DeepLinkExtractor.extractPersonUri(extras)
 
         val shortcutId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             notification.shortcutId
@@ -141,33 +144,56 @@ class QuietNotificationListenerService : NotificationListenerService() {
         }
 
         val dao = app.database.notificationDao()
-        val existing = dao.findRecentDuplicate(
+        val existingAny = dao.findLatestBySbnKeyAndContent(
             sbnKey = sbn.key,
-            title = title.ifBlank { appName },
-            text = text.ifBlank { bigText.orEmpty() },
+            title = extracted.title,
+            text = extracted.text,
         )
 
-        val savedId = if (existing != null) {
-            dao.touchNotification(
-                id = existing.id,
-                postedAt = sbn.postTime,
-                bigText = bigText ?: existing.bigText,
-                subText = subText ?: existing.subText,
-            )
-            existing.id
+        // Handle 24h snooze expiry re-post of an already-archived notification cleanly:
+        // cancel it in Android so it never reappears in the status bar or loops forever.
+        if (existingAny != null && existingAny.isArchived) {
+            val archivedCutoff = existingAny.archivedAt ?: existingAny.postedAt
+            if (sbn.postTime <= archivedCutoff) {
+                cancelSafely(sbn.key)
+                return
+            }
+        }
+
+        val existingActive = existingAny?.takeIf { !it.isArchived }
+        val savedId = if (existingActive != null) {
+            // If Android un-snoozed an unchanged Inbox notification after 24h, silently re-snooze
+            // and refresh its PendingIntent without bumping its timestamp in Inbox.
+            val isUnchangedSnoozeRepost = sbn.postTime <= existingActive.postedAt &&
+                (extracted.bigText == null || extracted.bigText == existingActive.bigText) &&
+                (extracted.subText == null || extracted.subText == existingActive.subText)
+
+            if (!isUnchangedSnoozeRepost) {
+                dao.touchNotification(
+                    id = existingActive.id,
+                    postedAt = maxOf(sbn.postTime, existingActive.postedAt),
+                    bigText = extracted.bigText ?: existingActive.bigText,
+                    subText = extracted.subText ?: existingActive.subText,
+                    deepLinkUrl = deepLinkUrl,
+                    personUri = personUri,
+                )
+            }
+            existingActive.id
         } else {
             dao.insert(
                 NotificationEntity(
                     sbnKey = sbn.key,
                     packageName = sbn.packageName,
                     appName = appName,
-                    title = title.ifBlank { appName },
-                    text = text.ifBlank { bigText.orEmpty() },
-                    bigText = bigText,
-                    subText = subText,
+                    title = extracted.title,
+                    text = extracted.text,
+                    bigText = extracted.bigText,
+                    subText = extracted.subText,
                     category = notification.category,
                     shortcutId = shortcutId,
                     channelId = channelId,
+                    deepLinkUrl = deepLinkUrl,
+                    personUri = personUri,
                     postedAt = sbn.postTime,
                     isArchived = false,
                     archivedAt = null,
@@ -175,18 +201,181 @@ class QuietNotificationListenerService : NotificationListenerService() {
             )
         }
 
-        // Capture live PendingIntent BEFORE dismissing from status bar so deep-links stay intact
+        // Capture live PendingIntents BEFORE hiding from status bar so deep-links stay intact
         PendingIntentStore.put(
             notificationId = savedId,
             sbnKey = sbn.key,
-            pendingIntent = notification.contentIntent,
+            packageName = sbn.packageName,
+            title = extracted.title,
+            text = extracted.text,
+            contentIntent = contentIntent,
+            bubbleIntent = bubbleIntent,
         )
 
-        try {
-            cancelNotification(sbn.key)
-        } catch (e: Exception) {
-            Log.w(TAG, "Unable to cancel notification ${sbn.key}: ${e.message}")
+        hideFromStatusBar(sbn.key)
+    }
+
+    /**
+     * Hides the notification from Android's status bar using [snoozeNotification] on API 26+
+     * so the originating app's deleteIntent is NOT triggered and the live [PendingIntent]
+     * stays preserved inside Android's system NotificationManagerService across process kills.
+     */
+    private fun hideFromStatusBar(sbnKey: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                snoozeNotification(sbnKey, SNOOZE_DURATION_MS)
+                return
+            } catch (e: Exception) {
+                Log.w(TAG, "snoozeNotification failed for $sbnKey, falling back to cancel: ${e.message}")
+            }
         }
+        cancelSafely(sbnKey)
+    }
+
+    private fun cancelSafely(sbnKey: String) {
+        try {
+            cancelNotification(sbnKey)
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to cancel notification $sbnKey: ${e.message}")
+        }
+    }
+
+    /**
+     * Restores live [PendingIntent]s from Android's snoozed and active notification pools into
+     * [PendingIntentStore]. Recovers deep links automatically after Battery Saver, Doze,
+     * launcher switches, or low-memory process kills.
+     */
+    private suspend fun rehydrateLiveIntentsInternal() {
+        val app = application as? QuietDrawerApplication ?: return
+        val liveNotifications = collectLiveStatusBarNotifications()
+        if (liveNotifications.isEmpty()) return
+
+        val recentRows = try {
+            app.database.notificationDao().getRecentNotificationsForRehydration(limit = 400)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load notifications for rehydration: ${e.message}")
+            emptyList()
+        }
+
+        val rowsBySbnKey = recentRows.groupBy { it.sbnKey }
+        val rowsByContentKey = recentRows.groupBy {
+            PendingIntentStore.contentKey(it.packageName, it.title, it.text)
+        }
+
+        for (sbn in liveNotifications) {
+            val notification = sbn.notification ?: continue
+            val contentIntent = notification.contentIntent
+            val bubbleIntent = extractBubbleIntent(notification)
+            if (contentIntent == null && bubbleIntent == null) continue
+
+            val appName = app.installedAppsProvider.resolveAppName(sbn.packageName)
+            val extracted = extractNotificationContent(notification, appName)
+            val title = extracted?.title.orEmpty()
+            val text = extracted?.text.orEmpty()
+
+            val matchedRows = rowsBySbnKey[sbn.key]
+                ?: if (extracted != null) {
+                    rowsByContentKey[PendingIntentStore.contentKey(sbn.packageName, title, text)]
+                } else {
+                    null
+                }
+
+            if (!matchedRows.isNullOrEmpty()) {
+                for (row in matchedRows) {
+                    PendingIntentStore.put(
+                        notificationId = row.id,
+                        sbnKey = row.sbnKey,
+                        packageName = row.packageName,
+                        title = row.title,
+                        text = row.text,
+                        contentIntent = contentIntent,
+                        bubbleIntent = bubbleIntent,
+                    )
+                }
+            } else {
+                PendingIntentStore.put(
+                    notificationId = null,
+                    sbnKey = sbn.key,
+                    packageName = sbn.packageName,
+                    title = title,
+                    text = text,
+                    contentIntent = contentIntent,
+                    bubbleIntent = bubbleIntent,
+                )
+            }
+        }
+    }
+
+    private fun collectLiveStatusBarNotifications(): List<StatusBarNotification> {
+        val result = ArrayList<StatusBarNotification>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                snoozedNotifications?.let { result.addAll(it) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to read snoozedNotifications: ${e.message}")
+            }
+        }
+        try {
+            activeNotifications?.let { result.addAll(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to read activeNotifications: ${e.message}")
+        }
+        return result
+    }
+
+    private fun findLiveIntentsForItemInternal(item: NotificationEntity): List<PendingIntent> {
+        val liveList = collectLiveStatusBarNotifications()
+        if (liveList.isEmpty()) return emptyList()
+
+        val found = ArrayList<PendingIntent>(2)
+        fun addUnique(pi: PendingIntent?) {
+            if (pi != null && found.none { it == pi }) found.add(pi)
+        }
+
+        // Priority 1: Exact sbnKey match
+        val exactMatch = liveList.firstOrNull { it.key == item.sbnKey }
+        if (exactMatch?.notification != null) {
+            val contentIntent = exactMatch.notification.contentIntent
+            val bubbleIntent = extractBubbleIntent(exactMatch.notification)
+            PendingIntentStore.put(
+                notificationId = item.id,
+                sbnKey = item.sbnKey,
+                packageName = item.packageName,
+                title = item.title,
+                text = item.text,
+                contentIntent = contentIntent,
+                bubbleIntent = bubbleIntent,
+            )
+            addUnique(contentIntent)
+            addUnique(bubbleIntent)
+        }
+
+        // Priority 2: Content fingerprint match within same package (if Android rotated sbnKey)
+        if (found.isEmpty()) {
+            val contentMatch = liveList.firstOrNull { sbn ->
+                if (sbn.packageName != item.packageName) return@firstOrNull false
+                val notif = sbn.notification ?: return@firstOrNull false
+                val extracted = extractNotificationContent(notif, item.appName) ?: return@firstOrNull false
+                extracted.title == item.title && extracted.text == item.text
+            }
+            if (contentMatch?.notification != null) {
+                val contentIntent = contentMatch.notification.contentIntent
+                val bubbleIntent = extractBubbleIntent(contentMatch.notification)
+                PendingIntentStore.put(
+                    notificationId = item.id,
+                    sbnKey = item.sbnKey,
+                    packageName = item.packageName,
+                    title = item.title,
+                    text = item.text,
+                    contentIntent = contentIntent,
+                    bubbleIntent = bubbleIntent,
+                )
+                addUnique(contentIntent)
+                addUnique(bubbleIntent)
+            }
+        }
+
+        return found
     }
 
     private fun shouldBypassAsOngoingOrCritical(
@@ -215,10 +404,54 @@ class QuietNotificationListenerService : NotificationListenerService() {
         return false
     }
 
+    private data class ExtractedContent(
+        val title: String,
+        val text: String,
+        val bigText: String?,
+        val subText: String?,
+    )
+
+    private fun extractNotificationContent(
+        notification: Notification,
+        appName: String,
+    ): ExtractedContent? {
+        val extras = notification.extras ?: return null
+        val rawTitle = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        val rawText = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() && it != rawText }
+        val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+        if (rawTitle.isBlank() && rawText.isBlank() && bigText.isNullOrBlank()) {
+            return null
+        }
+
+        return ExtractedContent(
+            title = rawTitle.ifBlank { appName },
+            text = rawText.ifBlank { bigText.orEmpty() },
+            bigText = bigText,
+            subText = subText,
+        )
+    }
+
+    private fun extractBubbleIntent(notification: Notification): PendingIntent? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                notification.bubbleMetadata?.intent
+            } catch (_: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+    }
+
     companion object {
         private const val TAG = "QuietListenerService"
         private const val TEST_CHANNEL_ID = "quietdrawer_test_channel"
         private const val EXTRA_IS_TEST_NOTIFICATION = "com.example.EXTRA_IS_TEST_NOTIFICATION"
+        private const val SNOOZE_DURATION_MS = 24L * 60L * 60L * 1000L // 24 hours
 
         @Volatile
         private var activeInstance: QuietNotificationListenerService? = null
@@ -230,6 +463,56 @@ class QuietNotificationListenerService : NotificationListenerService() {
             return NotificationManagerCompat
                 .getEnabledListenerPackages(context)
                 .contains(context.packageName)
+        }
+
+        /**
+         * Ensures the notification listener is bound (recovering automatically after launcher
+         * switches or Battery Saver) and refreshes live [PendingIntent]s from Android's snoozed pool.
+         */
+        fun ensureConnectedAndRehydrate(context: Context) {
+            if (!isNotificationAccessGranted(context)) return
+            val instance = activeInstance
+            if (instance == null || !_isConnected.value) {
+                try {
+                    val component = ComponentName(context, QuietNotificationListenerService::class.java)
+                    requestRebind(component)
+                } catch (e: Exception) {
+                    Log.w(TAG, "requestRebind failed: ${e.message}")
+                }
+            } else {
+                instance.serviceScope.launch {
+                    instance.rehydrateLiveIntentsInternal()
+                }
+            }
+        }
+
+        /**
+         * Synchronous tap-time lookup against Android's live snoozed & active notification pools
+         * in case [PendingIntentStore] was cleared by a process restart right before the user tapped.
+         */
+        fun findLiveIntentsOnDemand(item: NotificationEntity): List<PendingIntent> {
+            val instance = activeInstance ?: return emptyList()
+            return try {
+                instance.findLiveIntentsForItemInternal(item)
+            } catch (e: Exception) {
+                Log.w(TAG, "On-demand live intent lookup failed: ${e.message}")
+                emptyList()
+            }
+        }
+
+        /**
+         * Cleanly cancels snoozed notifications in Android when the user permanently deletes
+         * archived items or clears archive history.
+         */
+        fun cancelSnoozedKeys(sbnKeys: Collection<String>) {
+            val instance = activeInstance ?: return
+            val uniqueKeys = sbnKeys.filter { it.isNotBlank() }.distinct()
+            if (uniqueKeys.isEmpty()) return
+            instance.serviceScope.launch {
+                for (key in uniqueKeys) {
+                    instance.cancelSafely(key)
+                }
+            }
         }
 
         /**

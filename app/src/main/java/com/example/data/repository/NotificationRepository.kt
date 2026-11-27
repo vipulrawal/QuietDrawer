@@ -50,8 +50,10 @@ class NotificationRepository(
         notificationDao.deleteById(id)
     }
 
-    suspend fun clearAllArchived() {
+    suspend fun clearAllArchived(): List<String> {
+        val keys = notificationDao.getArchivedSbnKeys()
         notificationDao.clearAllArchived()
+        return keys
     }
 
     suspend fun setAppAllowedInStatusBar(

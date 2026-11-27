@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -30,6 +31,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.BatterySaver
 import androidx.compose.material.icons.rounded.BrightnessAuto
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DarkMode
@@ -92,6 +94,7 @@ fun SettingsScreen(
     val hostActivity = remember(context) { context.findComponentActivity() }
     val prefs by viewModel.userPreferences.collectAsStateWithLifecycle()
     val hasAccess by viewModel.isNotificationAccessGranted.collectAsStateWithLifecycle()
+    val isBatteryUnrestricted by viewModel.isIgnoringBatteryOptimizations.collectAsStateWithLifecycle()
     val updateResult by viewModel.updateCheckResult.collectAsStateWithLifecycle()
     val backupState by viewModel.driveBackupState.collectAsStateWithLifecycle()
 
@@ -387,6 +390,69 @@ fun SettingsScreen(
                         Icon(
                             imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
                             contentDescription = "Open Notification Access Settings",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                        modifier = Modifier.padding(vertical = 10.dp),
+                    )
+
+                    // Keep deep links alive across Battery Saver & launcher switches (opens App Info)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.fromParts("package", context.packageName, null)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                try {
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {
+                                    viewModel.emitFeedbackMessage("Open App Info → App battery usage → Unrestricted")
+                                }
+                            }
+                            .padding(vertical = 6.dp)
+                            .testTag("settings_battery_optimization_row"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.BatterySaver,
+                            contentDescription = null,
+                            tint = if (isBatteryUnrestricted) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.tertiary
+                            },
+                            modifier = Modifier.size(22.dp),
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.settings_battery_links_title),
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = if (isBatteryUnrestricted) {
+                                    stringResource(R.string.settings_battery_links_unrestricted)
+                                } else {
+                                    stringResource(R.string.settings_battery_links_restricted)
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isBatteryUnrestricted) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.tertiary
+                                },
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                            contentDescription = "Open QuietDrawer App Info for Battery Usage",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(18.dp),
                         )

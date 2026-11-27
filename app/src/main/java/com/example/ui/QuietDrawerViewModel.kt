@@ -1,7 +1,9 @@
 package com.example.ui
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
+import android.os.PowerManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.QuietDrawerApplication
@@ -103,6 +105,11 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
         QuietNotificationListenerService.isNotificationAccessGranted(application)
     )
     val isNotificationAccessGranted: StateFlow<Boolean> = _isNotificationAccessGranted.asStateFlow()
+
+    private val _isIgnoringBatteryOptimizations = MutableStateFlow(
+        checkIgnoringBatteryOptimizations(application)
+    )
+    val isIgnoringBatteryOptimizations: StateFlow<Boolean> = _isIgnoringBatteryOptimizations.asStateFlow()
 
     val isListenerConnected: StateFlow<Boolean> = QuietNotificationListenerService.isConnected
 
@@ -320,6 +327,21 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
             QuietNotificationListenerService.isNotificationAccessGranted(app)
     }
 
+    fun onAppResumed() {
+        refreshNotificationAccess()
+        _isIgnoringBatteryOptimizations.value = checkIgnoringBatteryOptimizations(app)
+        QuietNotificationListenerService.ensureConnectedAndRehydrate(app)
+    }
+
+    private fun checkIgnoringBatteryOptimizations(context: Context): Boolean {
+        return try {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            pm?.isIgnoringBatteryOptimizations(context.packageName) ?: false
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun refreshInstalledApps() {
         viewModelScope.launch {
             _isLoadingApps.value = true
@@ -498,13 +520,15 @@ class QuietDrawerViewModel(application: Application) : AndroidViewModel(applicat
     fun deleteArchivedItem(item: NotificationEntity) {
         viewModelScope.launch {
             repository.deletePermanently(item.id)
+            QuietNotificationListenerService.cancelSnoozedKeys(listOf(item.sbnKey))
             _events.emit(UiFeedbackEvent.Message("Removed from history"))
         }
     }
 
     fun clearAllArchived() {
         viewModelScope.launch {
-            repository.clearAllArchived()
+            val clearedKeys = repository.clearAllArchived()
+            QuietNotificationListenerService.cancelSnoozedKeys(clearedKeys)
             _events.emit(UiFeedbackEvent.Message("Archived history cleared"))
         }
     }

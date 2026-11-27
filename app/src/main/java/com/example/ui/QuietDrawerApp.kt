@@ -108,7 +108,7 @@ fun QuietDrawerApp(viewModel: QuietDrawerViewModel) {
     val inboxCount by viewModel.inboxCount.collectAsStateWithLifecycle()
 
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        viewModel.refreshNotificationAccess()
+        viewModel.onAppResumed()
         viewModel.refreshInstalledApps()
     }
 

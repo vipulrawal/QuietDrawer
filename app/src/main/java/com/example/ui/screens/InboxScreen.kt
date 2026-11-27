@@ -67,6 +67,7 @@ import com.example.service.NotificationLauncher
 import com.example.ui.QuietDrawerViewModel
 import com.example.ui.components.MultiSelectSwipeArchiveBar
 import com.example.ui.components.PermissionSetupBanner
+import com.example.ui.components.SwipeableAppGroupFooter
 import com.example.ui.components.SwipeableAppGroupHeader
 import com.example.ui.components.SwipeableNotificationRow
 
@@ -399,6 +400,17 @@ fun InboxScreen(
                                             }
                                         },
                                         modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+
+                            if (group.notifications.size > 5) {
+                                item(key = "group_footer_${group.packageName}") {
+                                    SwipeableAppGroupFooter(
+                                        group = group,
+                                        isSelectionMode = isSelectionMode,
+                                        onCollapseGroup = { viewModel.toggleGroupExpanded(group.packageName) },
+                                        onArchiveGroup = { viewModel.archiveGroup(group.packageName, group.appName) },
                                     )
                                 }
                             }

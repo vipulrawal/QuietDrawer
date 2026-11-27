@@ -35,11 +35,44 @@ interface NotificationDao {
         text: String,
     ): NotificationEntity?
 
+    @Query(
+        """
+        SELECT * FROM filtered_notifications
+        WHERE sbnKey = :sbnKey
+          AND title = :title
+          AND text = :text
+        ORDER BY postedAt DESC
+        LIMIT 1
+        """
+    )
+    suspend fun findLatestBySbnKeyAndContent(
+        sbnKey: String,
+        title: String,
+        text: String,
+    ): NotificationEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(notification: NotificationEntity): Long
 
-    @Query("UPDATE filtered_notifications SET postedAt = :postedAt, bigText = :bigText, subText = :subText WHERE id = :id")
-    suspend fun touchNotification(id: Long, postedAt: Long, bigText: String?, subText: String?)
+    @Query(
+        """
+        UPDATE filtered_notifications
+        SET postedAt = :postedAt,
+            bigText = :bigText,
+            subText = :subText,
+            deepLinkUrl = COALESCE(:deepLinkUrl, deepLinkUrl),
+            personUri = COALESCE(:personUri, personUri)
+        WHERE id = :id
+        """
+    )
+    suspend fun touchNotification(
+        id: Long,
+        postedAt: Long,
+        bigText: String?,
+        subText: String?,
+        deepLinkUrl: String? = null,
+        personUri: String? = null,
+    )
 
     @Query("UPDATE filtered_notifications SET isArchived = 1, archivedAt = :archivedAt WHERE id = :id")
     suspend fun archiveById(id: Long, archivedAt: Long = System.currentTimeMillis())
@@ -59,8 +92,14 @@ interface NotificationDao {
     @Query("DELETE FROM filtered_notifications WHERE id = :id")
     suspend fun deleteById(id: Long)
 
+    @Query("SELECT DISTINCT sbnKey FROM filtered_notifications WHERE isArchived = 1")
+    suspend fun getArchivedSbnKeys(): List<String>
+
     @Query("DELETE FROM filtered_notifications WHERE isArchived = 1")
     suspend fun clearAllArchived()
+
+    @Query("SELECT * FROM filtered_notifications ORDER BY isArchived ASC, postedAt DESC LIMIT :limit")
+    suspend fun getRecentNotificationsForRehydration(limit: Int = 400): List<NotificationEntity>
 
     @Query("SELECT * FROM filtered_notifications ORDER BY postedAt DESC")
     suspend fun getAllNotificationsSnapshot(): List<NotificationEntity>

@@ -501,6 +501,147 @@ fun SwipeableAppGroupHeader(
 }
 
 /**
+ * Bottom Group Swipe Footer: Shown at the end of expanded groups with more than 5 notifications
+ * so the user can swipe left or right (or tap Archive/Collapse) to clear the entire group
+ * without scrolling back to the top header.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SwipeableAppGroupFooter(
+    group: NotificationAppGroup,
+    isSelectionMode: Boolean,
+    onCollapseGroup: () -> Unit,
+    onArchiveGroup: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val haptics = LocalHapticFeedback.current
+    val latestIsSelectionMode = rememberUpdatedState(isSelectionMode)
+    val latestOnArchiveGroup = rememberUpdatedState(onArchiveGroup)
+    val hasTriggered = remember { mutableStateOf(false) }
+
+    val swipeState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd,
+                SwipeToDismissBoxValue.EndToStart -> {
+                    if (!latestIsSelectionMode.value && !hasTriggered.value) {
+                        hasTriggered.value = true
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        latestOnArchiveGroup.value()
+                        true
+                    } else {
+                        false
+                    }
+                }
+                SwipeToDismissBoxValue.Settled -> true
+            }
+        },
+        positionalThreshold = { totalDistance -> totalDistance * 0.45f },
+    )
+
+    // Always snap back to Settled on Undo, re-entry, or when group notifications change
+    LaunchedEffect(group.packageName, group.notifications.size, isSelectionMode) {
+        hasTriggered.value = false
+        if (swipeState.currentValue != SwipeToDismissBoxValue.Settled) {
+            swipeState.snapTo(SwipeToDismissBoxValue.Settled)
+        }
+    }
+
+    SwipeToDismissBox(
+        state = swipeState,
+        enableDismissFromStartToEnd = !isSelectionMode,
+        enableDismissFromEndToStart = !isSelectionMode,
+        backgroundContent = {
+            ArchiveSwipeBackground(
+                label = "${stringResource(R.string.action_archive_group)} (${group.notifications.size})",
+                dismissDirection = swipeState.dismissDirection,
+            )
+        },
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .testTag("app_group_footer_${group.packageName}"),
+    ) {
+        Surface(
+            onClick = onCollapseGroup,
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    imageVector = Icons.Rounded.Archive,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = stringResource(
+                        R.string.swipe_to_archive_group_footer,
+                        group.appName,
+                        group.notifications.size,
+                    ),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Icon(
+                    imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.size(18.dp),
+                )
+                if (!isSelectionMode) {
+                    IconButton(
+                        onClick = onArchiveGroup,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("archive_group_footer_button_${group.packageName}"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Archive,
+                            contentDescription = stringResource(R.string.action_archive_group),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onCollapseGroup,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .testTag("collapse_group_footer_button_${group.packageName}"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.ExpandLess,
+                        contentDescription = stringResource(R.string.action_collapse_group),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
  * Level 1 Archival (and Level 3 when in multi-select mode):
  * Swipe left or right on any individual notification to archive ONLY that notification
  * (or archive ONLY the selected notifications if this row is part of an active multi-selection).
